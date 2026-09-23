@@ -28,6 +28,7 @@ h1/kernel/obj/
 0_environment_setup.md
 3_startdash.md
 实验报告模板(1).md
-lab0/
 h1/
-lab1/
+lab1/*
+!lab1/code/
+!lab1/report/
