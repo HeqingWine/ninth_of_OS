@@ -23,3 +23,11 @@ h1/kernel/obj/
 *.bin
 *.asm
 *.sym
+
+# ===== 实验文件（暂缓提交，实验完成后按 labx 分支精确提交 labx/code 与 labx/report） =====
+0_environment_setup.md
+3_startdash.md
+实验报告模板(1).md
+h0/
+h1/
+lab1/
