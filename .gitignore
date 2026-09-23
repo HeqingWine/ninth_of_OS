@@ -1,0 +1,25 @@
+# ===== 本机环境与工具链（切勿提交） =====
+qemu/
+riscv/
+build/
+downloads/
+.venv/
+.vscode/
+.env
+*.zip
+
+# ===== 敏感信息（API 密钥、AI 对话记录、实验快照） =====
+h1/notes/
+h1/backups/
+
+# ===== 编译产物 =====
+lab1/bin/
+lab1/obj/
+h1/kernel/bin/
+h1/kernel/obj/
+*.o
+*.elf
+*.img
+*.bin
+*.asm
+*.sym
