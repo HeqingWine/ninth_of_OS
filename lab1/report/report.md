@@ -77,7 +77,7 @@
 
 回答：在复位地址 0x1000 处，具体可见调试结果截图。
 
-![调试截图](./images/Instruction_address.png)
+![调试截图](images/Instruction_address.png)
 
 **它们主要完成了哪些功能？**
 
@@ -91,13 +91,13 @@
 
 - 编译及运行成功的输出
 
-![测试过程截图](./images/process1.png)
+![测试过程截图](images/process1.png)
 
-![测试过程截图](./images/process2.png)
+![测试过程截图](images/process2.png)
 
 - 测试结果
 
-![测试结果截图](./images/result.png)
+![测试结果截图](images/result.png)
 
 ***
 
