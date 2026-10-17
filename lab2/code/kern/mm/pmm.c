@@ -61,7 +61,74 @@ size_t nr_free_pages(void) {
     return pmm_manager->nr_free_pages();
 }
 
-//lab2 function1 YOUR CODE
+//lab2 function1 [2413094]
+
+extern char end[];
+
+static void page_init(void) {
+    uint64_t mem_base = get_memory_base();
+    uint64_t mem_size = get_memory_size();
+
+    if (mem_base == 0 || mem_size == 0 || mem_base != DRAM_BASE ||
+        (mem_base & (PGSIZE - 1)) != 0 ||
+        mem_size > (~(uint64_t)0) - mem_base) {
+        panic("invalid physical memory range from DTB");
+    }
+
+    uint64_t mem_end = mem_base + mem_size;
+    if (mem_end <= KERNEL_BEGIN_PADDR) {
+        panic("physical memory range does not contain the kernel");
+    }
+
+    cprintf("physical memory map:\n  memory: 0x%016lx, [0x%016lx, 0x%016lx].\n",
+            mem_base, mem_base, mem_end - 1);
+
+    va_pa_offset = PHYSICAL_MEMORY_OFFSET;
+
+    uint64_t managed_end = mem_end;
+    if (managed_end > PHYSICAL_MEMORY_END) {
+        managed_end = PHYSICAL_MEMORY_END;
+    }
+    if (managed_end <= DRAM_BASE) {
+        panic("physical memory range is below the managed memory region");
+    }
+
+    npage = managed_end / PGSIZE;
+    if (npage < nbase) {
+        panic("physical memory range is too small");
+    }
+
+    size_t page_count = npage - nbase;
+    uintptr_t pages_va = ((uintptr_t)end + PGSIZE - 1) & ~(PGSIZE - 1);
+    size_t pages_bytes = page_count * sizeof(struct Page);
+    if (pages_bytes > (~(uintptr_t)0) - pages_va) {
+        panic("Page descriptor array address overflow");
+    }
+    uintptr_t pages_end_va = pages_va + pages_bytes;
+
+    pages = (struct Page *)pages_va;
+
+    for (size_t i = 0; i < page_count; i++) {
+        pages[i].ref = 0;
+        pages[i].flags = 0;
+        pages[i].property = 0;
+        list_init(&pages[i].page_link);
+        SetPageReserved(&pages[i]);
+    }
+
+    uintptr_t pages_end_pa = PADDR(pages_end_va);
+    if (pages_end_pa > managed_end) {
+        panic("Page descriptor array exceeds managed physical memory");
+    }
+
+    uintptr_t free_start_pa =
+        (pages_end_pa + PGSIZE - 1) & ~(PGSIZE - 1);
+    uintptr_t free_end_pa = managed_end & ~(PGSIZE - 1);
+    if (free_start_pa < free_end_pa) {
+        init_memmap(pa2page(free_start_pa),
+                    (free_end_pa - free_start_pa) / PGSIZE);
+    }
+}
 
 /* pmm_init - initialize the physical memory management */
 void pmm_init(void) {
@@ -89,3 +156,4 @@ static void check_alloc_page(void) {
     pmm_manager->check();
     cprintf("check_alloc_page() succeeded!\n");
 }
+
