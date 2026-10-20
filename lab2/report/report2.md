@@ -1,4 +1,3 @@
-
 # 操作系统实验报告
 
 ## 实验基本信息
@@ -37,7 +36,7 @@
 | -------------- | ----------------------------------------------------------------------------- | --------------------------------------------------------- | ------------------ |
 | 2413094-卢思齐 | Copilot（VS Code插件）                                                        | DeepSeek-V4-pro                                           | 自定义Agent        |
 | 2411617-陈彦冰 | [例如：Cline（VS Code插件） / Claude Code（终端 Agent） / DeepSeek Harness等] | [例如：Claude Sonnet 4.5 / GPT-5.5 / DeepSeek-V4-Flash等] | [可选：特殊配置等] |
-| 2414113-焦程远 | [例如：Cline（VS Code插件） / Claude Code（终端 Agent） / DeepSeek Harness等] | [例如：Claude Sonnet 4.5 / GPT-5.5 / DeepSeek-V4-Flash等] | [可选：特殊配置等] |
+| 2414113-焦程远 | Copilot（VS Code插件）                                                        | DeepSeek-V4-pro                                           | [可选：特殊配置等] |
 
 **说明：**
 
@@ -267,7 +266,6 @@ cprintf("physical memory map:\\n  memory: 0x%016lx, [0x%016lx, 0x%016lx].\\n", m
 -错误终止使用 panic()。
 
 -辅助函数如果新增，应设为static，且不得改变公开接口。
-
 ```
 
 #### 实现迭代过程
@@ -439,7 +437,6 @@ F. best_fit_pmm_manager 与 pmm.c
   第一步：先不切 pmm.c:37，cd lab2/code && make clean && make grade，预期 Test 1 PASS、Test 2 FAIL，确认构建、链接和 page_init 正常；
   第二步：再应用 pmm.c 一行 diff，make clean && make grade，预期两行 PASS，且 best_fit_check 不 panic。
 并提醒我：make grade 会 clean 并复制到 /tmp/lab2_grade，跑前保存修改；make 与 make grade 切换前必须 make clean。
-
 ```
 
 #### 实现迭代过程
@@ -494,7 +491,7 @@ F. best_fit_pmm_manager 与 pmm.c
 
 #### 任务三：buddy system（伙伴系统）分配算法
 
-\*\*负责人：\*\*2414113-焦程远
+**负责人:** 2414113-焦程远
 
 #### 模块功能描述
 
@@ -524,7 +521,6 @@ extern const struct pmm_manager buddy_pmm_manager;
   从高阶块逐级**分裂**；释放时用位运算 `ppn ^ (1 << order)` 直接定位**伙伴**，伙伴空闲则**合并**升阶。
   相比 First-Fit/Best-Fit 的线性扫描，伙伴系统的分配与合并都是 O(log N)（本机 N≤2^15，即常数次循环），
   是三种算法中时间效率最高的方案。
-
 - 需要处理的主要场景
 
   1. 任意页数的请求：`n` 向上取整到 `2^ceil(log2 n)`（3 页占 4 页额度、70 页占 128 页额度），内部碎片换取 O(log N)；
@@ -532,7 +528,6 @@ extern const struct pmm_manager buddy_pmm_manager;
   3. **块首对齐**：伙伴位运算成立的前提是块首按 `2^order` 对齐，切块时必须检查并对不齐的块降阶；
   4. 伙伴合并：释放时循环检查 `ppn ^ (1 << order)` 处的伙伴是否空闲且同阶，合并后块首取地址较小者；
   5. 边界：请求超过最大块（2^15 页）或超过总空闲页时返回 NULL；释放保留页（内核/页表占用）时断言失败。
-
 - 与其他模块的交互关系
 
   1. 与 `pmm.c` 的交互：`init_pmm_manager()` 把全局 `pmm_manager` 切换为 `buddy_pmm_manager` 后，
