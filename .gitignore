@@ -1,45 +1,25 @@
-# ===== 本机环境与工具链（切勿提交） =====
-qemu/
-riscv/
-build/
-downloads/
+# 本地环境与敏感信息
+.env
 .venv/
 .vscode/
-.env
-*.zip
+__pycache__/
+*.pyc
+.cache/
 
-# ===== 敏感信息（API 密钥、AI 对话记录、实验快照） =====
-h1/notes/
-h1/backups/
-
-# ===== 编译产物 =====
-lab1/bin/
-lab1/obj/
-h1/kernel/bin/
-h1/kernel/obj/
-*.o
-*.elf
-*.img
-*.bin
-*.asm
-*.sym
-
-# ===== 实验文件（暂缓提交，实验完成后按 labx 分支精确提交 labx/code 与 labx/report） =====
-0_environment_setup.md
-3_startdash.md
-实验报告模板(1).md
-h1/
-lab1/*
-!lab1/code/
-!lab1/report/
-
-# ===== 课程说明文档（仅本地参考，不随代码交付） =====
-0_environment_setup(2).md
-实验提交要求.md
-
-# ===== 本地一键运行脚本（本机环境相关） =====
+# 本地教学包与草稿（不提交到远程）
+/h1/
+/h2/
+/lab0/
+/lab1/
 run_lab.bat
 run_lab.py
-
-# ===== 根目录自动生成的实验报告草稿（正式报告在 labx/report/report.md） =====
 lab1_report.md
+0_environment_setup.md
+0_environment_setup(2).md
+3_startdash.md
+实验报告模板(1).md
+实验提交要求.md
+
+# 构建产物
+/lab2/code/bin/
+/lab2/code/obj/
