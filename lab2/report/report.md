@@ -35,7 +35,7 @@
 | 成员           | AI 编程工具                                                                   | 底层模型                                                  | 备注               |
 | -------------- | ----------------------------------------------------------------------------- | --------------------------------------------------------- | ------------------ |
 | 2413094-卢思齐 | Copilot（VS Code插件）                                                        | DeepSeek-V4-pro                                           | 自定义Agent        |
-| 2411617-陈彦冰 | [例如：Cline（VS Code插件） / Claude Code（终端 Agent） / DeepSeek Harness等] | [例如：Claude Sonnet 4.5 / GPT-5.5 / DeepSeek-V4-Flash等] | [可选：特殊配置等] |
+| 2411617-陈彦冰 | Claude Code（VS Code插件） | DeepSeek-Flash |  |
 | 2414113-焦程远 | Copilot（VS Code插件）                                                        | DeepSeek-V4-pro                                           | 自定义Agent |
 
 **说明：**
@@ -300,16 +300,43 @@ AI直接生成正确代码，人工审查无误
 **需要实现/修改的函数：**
 
 ```c
-// 列出本模块涉及的所有函数签名
-void example_function(void);
-int another_function(int arg);
+// kern/mm/best_fit_pmm.c
+static void best_fit_init(void);
+static void best_fit_init_memmap(struct Page *base, size_t n);
+static struct Page * best_fit_alloc_pages(size_t n);
+static void best_fit_free_pages(struct Page *base, size_t n);
+static size_t best_fit_nr_free_pages(void)
 ```
 
 **功能说明：**
 
 - 该模块在整个系统中的作用
+
+  该模块在 `kern/mm/best_fit_pmm.c` 中实现了一个完整的 Best-Fit 连续物理内存分配器，并作为 `struct pmm_manager` 的一个具体实例 `best_fit_pmm_manager` 注册到内核。它提供 6 个对外接口：`init`、`init_memmap`、`alloc_pages`、`free_pages`、`nr_free_pages`、`check`，内部维护一个按物理地址升序排列的空闲块链表 `free_list` 和空闲页计数 `nr_free`。
+  它是物理内存管理器的一种可替换策略实现，位于 `page_init()` 注册初始空闲区之后、`alloc_page()/free_page()` 被内核其他子系统调用之前，决定“页级连续内存如何分配与回收”。具体作用包括：
+  承接 `page_init()` 通过 `init_memmap()` 交来的可用物理页范围，建立初始空闲块链表；
+  为上层提供 `alloc_pages(n)` / `free_pages(base, n)` 的页级分配与回收能力；
+  通过 `pmm.c:37` 的选择语句成为“当前生效 manager”，使 `check_alloc_page()` 调用它的 `check` 做自检；
+  与 First-Fit、Buddy System 并列，是同一接口契约下不同分配策略的实例，可整体替换而不影响框架。
+
 - 需要处理的主要场景
+
+  1. **初始化**：`init` 清空链表与计数；`init_memmap` 把一段连续可管理页作为单个空闲块按地址升序注册，逐页清 `flags/property/ref`，仅块头设 `property=n` 和 `PageProperty`。
+  2. **分配**：n=0 或链表为空（即使 `nr_free>0`）返回 NULL；遍历找最小满足块；正好相等则整块摘除；大于则切分剩余块插回原位置；失败路径不得改动链表、`property`、`nr_free`；不得跨非连续页拼块。
+  3. **释放与合并**：按地址升序插入；先与前驱合并（`prev + prev->property == base`），再与后继合并（`base + base->property == next`）；被吸收块清 `PageProperty` 并 `list_del`；`nr_free` 只在释放时增加一次，合并不重复计数。
+  4. **查询**：`nr_free_pages` 返回的空闲页总数必须与 init/alloc/free 的增减严格一致。
+  5. **自检**：`basic_check()` 与 `best_fit_check()` 验证分配返回值、引用计数不变、链表为空时分配失败、相邻块合并、恰好返回最小满足块（如 1 页请求应选 1 页块而非 2 页块）、`nr_free` 账目精确、链表块数与 `property` 总和回到初始状态。
+
 - 与其他模块的交互关系
+
+  1. **`pmm.c`**：`init_pmm_manager()` 第 37 行选择 `&best_fit_pmm_manager`；`page_init()` 调用其 `init_memmap` 注册空闲区；`pmm_init()` 通过 `check_alloc_page()` 触发其 `check`；`alloc_page()/free_page()` 宏转发到 manager 函数指针。
+  2. **`pmm.h`**：提供 `struct pmm_manager` 的 7 字段接口契约和 `pmm_manager` 全局指针，模块必须严格按此签名实现。
+  3. **`memlayout.h`**：提供 `struct Page` 的 `ref/flags/property/page_link` 字段、`PG_property` 位与 `Set/Clear/PageProperty` 宏、`le2page` 和 `free_area_t`，模块依赖这些定义维护块头状态和链表结点。
+  4. **`libs/list.h`**：提供 `list_init/list_add/list_add_before/list_del/list_next/list_prev/list_empty` 等链表操作，模块用它们维护按地址升序的 `free_list`。
+  5. **`default_pmm.c`**：作为 First-Fit 参考实现和状态约定来源，模块不修改它，但沿用其 `property/flags/ref/free_list/nr_free` 语义。
+  6. **`best_fit_pmm.h`**：提供 `extern const struct pmm_manager best_fit_pmm_manager;` 声明，`pmm.c` 已 include。
+  7. **`tools/test_lab2.c`**：`test_best_fit()` 只检查 `pmm_manager == &best_fit_pmm_manager`，是“门卫”；算法本体由 `check_alloc_page()` 调用的 `best_fit_check()` 验证。`make grade` 通过 `inject.py` 注入两个测试，与任务一 `test_page_init()` 在同一次运行中执行。
+  8. **与任务三 Buddy System**：两者互斥于 `pmm.c:37` 的“当前 manager”选择；同一时刻只能有一个 manager 生效，切换后需重跑 `make clean && make grade` 确认任务一/任务二输出状态。
 
 #### 最终提示词
 
@@ -632,6 +659,9 @@ first-fit 连续物理内存分配算法作为物理内存分配一个很基础�
 2. First-Fit是否有改进空间？
 
    - 有。当前实现按地址排序的空闲链表逐块查找，查找开销随空闲块数量线性增长；分配和释放较频繁时，扫描可能变慢。此外，First-Fit可能造成外部碎片。不过，该实现会在释放时立即合并前后相邻的空闲块，有助于缓解碎片。
+
+3. 你的 Best-Fit 算法是否有进一步的改进空间？
+   - 有。比如，每次分配都要全表扫描，以及Best-Fit 易产生大量小碎片。可以用按尺寸分桶的分离空闲链表，或按 (property, 地址) 建平衡树，采取延迟合并、buddy/slab 等策略。
 
 ---
 
