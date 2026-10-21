@@ -26,7 +26,7 @@
 | 成员           | AI 编程工具                                                                   | 底层模型                                                  | 备注               |
 | -------------- | ----------------------------------------------------------------------------- | --------------------------------------------------------- | ------------------ |
 | 2413094-卢思齐 | Copilot（VS Code插件）                                                        | DeepSeek-V4-pro                                           |自定义Agent                    |
-| 2411617-陈彦冰 | [例如：Cline（VS Code插件） / Claude Code（终端 Agent） / DeepSeek Harness等] | [例如：Claude Sonnet 4.5 / GPT-5.5 / DeepSeek-V4-Flash等] | [可选：特殊配置等] |
+| 2411617-陈彦冰 | Claude Code（）VS Code插件 | DeepSeek-Flash |  |
 | 2414113-焦程远 | Copilot（VS Code插件） |  DeepSeek-V4-pro | 自定义Agent |
 
 **说明：**
@@ -231,18 +231,13 @@ AI直接生成正确代码，人工审查无误
 **需要实现/修改的函数：**
 
 ```c
-// 列出本模块涉及的所有函数签名
-void example_function(void);
-int another_function(int arg);
+// kern/mm/best_fit_pmm.c
+static void best_fit_init(void);
+static void best_fit_init_memmap(struct Page *base, size_t n);
+static struct Page * best_fit_alloc_pages(size_t n);
+static void best_fit_free_pages(struct Page *base, size_t n);
+static size_t best_fit_nr_free_pages(void)
 ```
-
-**功能说明：**
-
-[简要描述该模块的功能，包括：
-
-- 该模块在整个系统中的作用
-- 需要处理的主要场景
-- 与其他模块的交互关系]
 
 #### 最终提示词
 
