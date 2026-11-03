@@ -6,7 +6,7 @@
 | --- | --- |
 | **实验名称** | Lab 3: 中断处理机制 |
 | **小组成员** | 2413094-卢思齐、2414113-焦程远、2411617-陈彦冰 |
-| **完成日期** | YYYY-MM-DD |
+| **完成日期** | 2026-11-02 |
 
 ### 小组分工
 
@@ -373,76 +373,118 @@ AI直接生成正确代码，人工审查无误
 **需要实现/修改的函数：**
 
 ```c
-// 列出本模块涉及的所有函数签名
-void example_function(void);
-int another_function(int arg);
+// 修改文件：kern/trap/trap.c
+void interrupt_handler(struct trapframe *tf);   // 中断分类处理
+void exception_handler(struct trapframe *tf);   // 异常分类处理
+
+// 修改文件：kern/trap/trap.h
+// 补充上述两个函数的声明
 ```
 
 **功能说明：**
 
-[简要描述该模块的功能，包括：
-
 - 该模块在整个系统中的作用
+
+    - 本模块是 Trap 处理机制的“业务核心”。模块一负责把 Trap 现场保存进 `trapframe` 并交给 C 语言层，而本模块则依据 `scause` 的值对这些 Trap 进行具体分类与处理：对时钟中断完成重武装、计数、统计与关机，对软中断进行类型提示，对非法指令与断点异常按指令长度更新执行位置，对无法识别的中断/异常输出完整现场信息辅助调试。
+
 - 需要处理的主要场景
-- 与其他模块的交互关系]
+
+    1. 时钟中断（`IRQ_S_TIMER`）：调用 `clock_set_next_event()` 设置下一次时钟事件，保证时钟中断能够持续产生；每收到一次中断将 `ticks` 加一；当 `ticks` 达到 `TICK_NUM` 的整数倍时输出规定格式的统计信息；累计输出达到 `SHUTDOWN_AFTER` 次后调用 SBI 关机接口结束系统。
+    2. 软中断（`IRQ_S_SOFT`）：完成基本的类型区分并输出对应提示。
+    3. 未知中断：输出 `Unknown interrupt: cause ...` 提示，并调用 `print_trapframe(tf)` 打印完整 Trap frame 辅助调试。
+    4. 非法指令异常（`CAUSE_ILLEGAL_INSTRUCTION`）：按规定格式输出，并依据指令长度正确推进 `tf->epc`，保证 Trap 返回后不会重复执行已经触发异常的指令。
+    5. 断点异常（`CAUSE_BREAKPOINT`）：按规定格式输出，同样依据指令长度推进 `tf->epc`。
+    6. 其他异常：调用 `print_trapframe(tf)` 输出完整现场辅助调试。
+
+- 与其他模块的交互关系
+
+    1. 与模块一的交互：模块一的 `__alltraps` 将 `trapframe` 传入 `trap()`，`trap_dispatch()` 依据 `cause` 最高位（Interrupt 位）把控制流分发给本模块的 `interrupt_handler` / `exception_handler`；处理完成后控制流返回到统一的 Trap 返回流程，由模块一的 `RESTORE_ALL` 与 `sret` 恢复现场。
+    2. 与时钟驱动的交互：调用 `clock_set_next_event()` 重新武装下一次时钟事件，并读写全局计数 `ticks`。
+    3. 与 SBI 的交互：达到规定条件后调用 `libs/sbi.h` 提供的 `sbi_shutdown()` 执行系统关机。
 
 #### 最终提示词
 
 以下是经过迭代优化后，最终成功实现该功能的提示词：
 
 ```markdown
+[PROMPT]
+需要完成中断与异常处理功能部分，对 Trap 入口传递过来的中断和异常进行具体分类和处理。
 
-[按照提示词模板，给出具体的提示词]
+[RELY]
+struct trapframe、trap_dispatch()、interrupt_handler()、exception_handler()、print_trapframe()、clock_set_next_event()、ticks、TICK_NUM、SHUTDOWN_AFTER、IRQ_S_TIMER、CAUSE_ILLEGAL_INSTRUCTION、CAUSE_BREAKPOINT 以及 libs/sbi.h 中提供的关机相关接口。
 
+[GUARANTEE]
+interrupt_handler() 接收当前 Trap frame，根据 Trap 原因处理中断，并返回到统一的 Trap 返回流程；
+IRQ_S_TIMER 必须能持续产生时钟中断，在一定条件下输出统计信息和执行系统关机
+exception_handler() 接收当前 Trap frame，根据 tf->cause 区分非法指令异常、断点异常以及其他异常，并完成规定的输出和执行位置更新。
+需要保持“Trap 类型识别、处理行为、执行位置更新、后续 Trap 返回”之间的一致性。
+时钟中断不能只进行计数而不设置时钟事件，ticks 每收到一次时钟中断必须增加一次，并且当其达到 TICK_NUM 的整数倍时输出规定格式的统计信息；
+不能假定所有异常使用相同的 epc 偏移量（因为不同异常对应的指令长度可能不同）
+整个模块不得修改函数签名，也不得修改 trap.c 中规定以外的其他函数。
+
+[SPECIFICATION]
+interrupt_handler() 负责处理中断，其中时钟中断需要完成下一次时钟事件设置、时钟计数、统计信息输出以及达到规定次数后的系统关机；
+print_trapframe(tf) 对无法识别的中断输出完整 Trap frame 以辅助调试。
+exception_handler() 负责处理实验要求的异常，对非法指令异常、断点异常，要输出符合规定格式的信息，依据指令长度正确更新 tf->epc，需要保证 Trap 返回以后不会重复执行已经触发异常的指令
 ```
 
 #### 实现迭代过程
 
-本模块的实现经历了 [N] 次迭代，过程如下：
+本模块的实现经历了 3 次迭代，过程如下：
 
 ***
 
 ##### 第一次迭代
 
-如果设计的prompt生成代码后出现问题：
+AI 依据最终提示词直接生成 `interrupt_handler` 与 `exception_handler`，并补充 `trap.h` 中的函数声明。执行 `make` 时遇到编译错误。
 
 **遇到的问题：**
 
-- 问题1：问题描述、错误信息和原因分析
-- 问题2：问题描述、错误信息和原因分析
+- 问题1：`best_fit_pmm.c` 编译报错 `'free_list' undeclared`、`'nr_free' undeclared`——lab3 骨架中 `//lab2 请补充你在lab2中的代码` 处为空，Best-Fit 实现未填入，但 Makefile 仍会编译该文件。
+- 问题2：`pmm.c` 编译报错 `implicit declaration of function 'page_init'`——骨架删除了 lab2 的 `page_init`（DTB 物理内存探测）实现，坑位留空。
+- 问题3：`memlayout.h` 缺少 `PHYSICAL_MEMORY_END`、`KERNEL_BEGIN_PADDR`、`KERNEL_BEGIN_VADDR` 三个宏，导致相关代码无法编译。
 
 **问题解决策略：**
 
-- 针对问题1：[说明如何修改提示词]
-- 针对问题2：[说明如何修改提示词]
+- 以上问题均为 lab2 依赖坑位而非提示词本身缺陷，不需要修改提示词。将 lab2 交付版中的 Best-Fit 完整实现、`page_init`（基于 DTB 的内存探测与空闲页初始化）移植到 lab3 骨架对应坑位，并补齐 `memlayout.h` 的三个宏，编译通过。
 
-如果没有问题：
+***
+
+##### 第二次迭代
+
+编译通过后，本机 QEMU 运行内核时无任何内核输出，陷入无限 page fault。
+
+**遇到的问题：**
+
+- 问题1：内核启动即卡死。经 lab2 调试已定位：`entry.S` 的启动页表只有高地址映射（index 511），本机 QEMU 11 下执行 `csrw satp` 后，下一条指令仍从物理地址取指，引发无限 `exec_page_fault`。
+
+**问题解决策略：**
+
+- 给启动页表增加恒等映射（页表条目 index 2 与 index 511 都映射 PA 0x80000000 的 1G 大页），保证开启分页后物理地址仍可执行。
+
+***
+
+##### 第三次迭代
+
+修复启动映射后，按照官方评分流程（`inject.py` 注入测试 + `DEFS+=-DGRADE_LAB3_*` 编译 + QEMU 抓取串口输出）对本机进行了等价模拟评分。
+
+**遇到的问题：**
+
+- 无。三个评分用例一次通过。
 
 **最终结果：**
 
-经过 [N] 次迭代，该模块最终：
+经过 3 次迭代，该模块最终：
 
 - ✅ 编译通过
-- ✅ 所有相关测试通过
+- ✅ 所有相关测试通过（GRADE_LAB3_CONTEXT 35/35、GRADE_LAB3_ILLEGAL 25/25、GRADE_LAB3_TIMER 40/40，总分 100/100）
 - ✅ 功能符合预期
 
-**关键改进点总结（如有）：**
+**关键改进点总结：**
 
-1. [改进点1：例如，在 [RELY] 中补充了完整的系统调用号定义]
-2. [改进点2：例如，在 [SPECIFICATION] 中明确了异常处理的边界条件]
-3. [改进点3：例如，增加了对用户指针合法性检查的要求]
-
-***
-
-##### 第二次迭代（如有）
-
-[按照和第一次迭代相同的格式]
-
-***
-
-##### 第三次迭代（如有）
-
-[按照和第一次迭代相同的格式]
+1. 在 [GUARANTEE] 中明确了“不能假定所有异常使用相同的 epc 偏移量”，据此实现了 `instr_length()`：读取 `epc` 处指令的低 2 位，为 `11` 时判定为 32 位指令（偏移 4 字节），否则为 16 位压缩指令（偏移 2 字节），保证 `ebreak` 与 `c.ebreak` 均能正确跳过。
+2. 在 [SPECIFICATION] 中明确了关机时机：定义 `SHUTDOWN_AFTER 3`，在第三次输出统计信息（ticks=300）后调用 `sbi_shutdown()`，确保 Test 3 在 ticks=200 打印 PASS 之后才关机。
+3. 明确了未知中断与未知异常的统一调试策略：均调用 `print_trapframe(tf)` 输出完整 Trap frame（评分要求 trapframe 输出中包含 `cause 0x00000014`）。
 
 ***
 
@@ -462,6 +504,12 @@ int another_function(int arg);
 
 
 在截图3中，该测试验证了时钟中断的持续触发与处理，系统能够稳定地反复进入和退出 Trap，最终结果显示各项测试全部通过，总分达到 100/100。
+
+![Test 1 断点与上下文恢复](./images/test1.png)
+
+![Test 2 非法指令与 handler 回退](./images/test2.png)
+
+![Test 3 持续时钟中断与关机](./images/test3.png)
 
 ***
 
@@ -505,8 +553,8 @@ int another_function(int arg);
 
 ### AI 协作开发的经验
 
-1. **规范提示词书写**：本次实验与AI协作中最有效的做法是把提示词当成一份契约文书来写，严谨地列举所有注意事项与使用者需求，比如，[RELY] 枚举全部可依赖的符号，避免 AI 凭空杜撰不存在的接口；[GUARANTEE] 明确行为约束与禁止事项（如“不能假定所有异常使用相同的 epc 偏移量”），直接决定了 `instr_length()` 的实现方式；[SPECIFICATION] 描述每个函数的输入输出语义。提示词写得越精确，AI 生成的代码越接近一次通过。
-2. **学会让 AI 闭环迭代而不是只看代码**：在实践中我们发现仅仅让 AI 输出代码是不够的。真正暴露问题的是“生成 → 编译 → 运行 → 评分”的闭环，完成任务之后的编译阶段让我们及时发现了 lab2 依赖坑位未填，而再之后的运行阶段发现了本机环境下 QEMU 启动页表缺少恒等映射。
-3. **时刻谨记环境差异要写进提示词或笔记**：官方评分脚本假设了 Linux 环境（`/tmp`、`-device loader` 启动），但本机是 Windows + QEMU 11，两者行为不同。我们在编译前一定要把这类环境约束提前告知 AI，这样我们就能避免在排查环境问题上少走很多弯路。
+1. **提示词是接口契约**：本次最有效的做法是把提示词当成一份“接口契约”来写——[RELY] 枚举全部可依赖的符号，避免 AI 凭空杜撰不存在的接口；[GUARANTEE] 明确行为约束与禁止事项（如“不能假定所有异常使用相同的 epc 偏移量”），直接决定了 `instr_length()` 的实现方式；[SPECIFICATION] 描述每个函数的输入输出语义。契约写得越精确，AI 生成的代码越接近一次通过。
+2. **让 AI 闭环迭代，而不是只看代码**：仅仅让 AI 输出代码是不够的。真正暴露问题的是“生成 → 编译 → 运行 → 评分”的闭环：编译阶段发现了 lab2 依赖坑位未填、运行阶段发现了本机 QEMU 下启动页表缺少恒等映射。这些坑都记录进了迭代过程，成为报告最有价值的部分。
+3. **环境差异要写进提示词或笔记**：官方评分脚本假设 Linux 环境（`/tmp`、`-device loader` 启动），而本机是 Windows + QEMU 11，两者行为不同。把这类环境约束提前告知 AI，能少走很多弯路；否则 AI 会按“标准环境”给出无法复现的操作步骤。
 
 ***

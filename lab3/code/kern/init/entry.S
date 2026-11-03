@@ -63,7 +63,11 @@ bootstacktop:
 boot_page_table_sv39:
     # 0xffffffff_c0000000 map to 0x80000000 (1G)
     # 前 511 个页表项均设置为 0 ，因此 V=0 ，意味着是空的(unmapped)
-    .zero 8 * 511
+    # [本机修复] 加入恒等映射：VPN2=2 映射 PA 0x80000000（1G），
+    # 使 csrw satp 后仍能从物理地址取指执行（QEMU 11 需要，详见 lab2 调试笔记）
+    .zero 8 * 2
+    .quad (0x80000 << 10) | 0xcf # VRWXAD
+    .zero 8 * 508
     # 设置最后一个页表项，PPN=0x80000，标志位 VRWXAD 均为 1
     .quad (0x80000 << 10) | 0xcf # VRWXAD
 
