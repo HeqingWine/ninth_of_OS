@@ -335,9 +335,12 @@ AI直接生成正确代码，人工审查无误
 **需要实现/修改的函数：**
 
 ```c
-// 列出本模块涉及的所有函数签名
-void example_function(void);
-int another_function(int arg);
+// 修改文件：kern/trap/trap.c
+void interrupt_handler(struct trapframe *tf);   // 中断分类处理
+void exception_handler(struct trapframe *tf);   // 异常分类处理
+
+// 修改文件：kern/trap/trap.h
+// 补充上述两个函数的声明
 ```
 
 #### 最终提示词
@@ -345,57 +348,77 @@ int another_function(int arg);
 以下是经过迭代优化后，最终成功实现该功能的提示词：
 
 ```markdown
+[PROMPT]
+需要完成中断与异常处理功能部分，对 Trap 入口传递过来的中断和异常进行具体分类和处理。
 
-[按照提示词模板，给出具体的提示词]
+[RELY]
+struct trapframe、trap_dispatch()、interrupt_handler()、exception_handler()、print_trapframe()、clock_set_next_event()、ticks、TICK_NUM、SHUTDOWN_AFTER、IRQ_S_TIMER、CAUSE_ILLEGAL_INSTRUCTION、CAUSE_BREAKPOINT 以及 libs/sbi.h 中提供的关机相关接口。
 
+[GUARANTEE]
+interrupt_handler() 接收当前 Trap frame，根据 Trap 原因处理中断，并返回到统一的 Trap 返回流程；
+IRQ_S_TIMER 必须能持续产生时钟中断，在一定条件下输出统计信息和执行系统关机
+exception_handler() 接收当前 Trap frame，根据 tf->cause 区分非法指令异常、断点异常以及其他异常，并完成规定的输出和执行位置更新。
+需要保持“Trap 类型识别、处理行为、执行位置更新、后续 Trap 返回”之间的一致性。
+时钟中断不能只进行计数而不设置时钟事件，ticks 每收到一次时钟中断必须增加一次，并且当其达到 TICK_NUM 的整数倍时输出规定格式的统计信息；
+不能假定所有异常使用相同的 epc 偏移量（因为不同异常对应的指令长度可能不同）
+整个模块不得修改函数签名，也不得修改 trap.c 中规定以外的其他函数。
+
+[SPECIFICATION]
+interrupt_handler() 负责处理中断，其中时钟中断需要完成下一次时钟事件设置、时钟计数、统计信息输出以及达到规定次数后的系统关机；
+print_trapframe(tf) 对无法识别的中断输出完整 Trap frame 以辅助调试。
+exception_handler() 负责处理实验要求的异常，对非法指令异常、断点异常，要输出符合规定格式的信息，依据指令长度正确更新 tf->epc，需要保证 Trap 返回以后不会重复执行已经触发异常的指令
 ```
 
 #### 实现迭代过程
 
-本模块的实现经历了 [N] 次迭代，过程如下：
+本模块的实现经历了 3 次迭代：
 
 ***
 
 ##### 第一次迭代
 
-如果设计的prompt生成代码后出现问题：
-
 **遇到的问题：**
 
-- 问题1：问题描述、错误信息和原因分析
-- 问题2：问题描述、错误信息和原因分析
+- 问题1：`best_fit_pmm.c` 编译报错 `'free_list' undeclared`、`'nr_free' undeclared`（lab2 依赖坑位为空）。
+- 问题2：`pmm.c` 编译报错 `implicit declaration of function 'page_init'`（lab2 的 DTB 内存探测实现被删）。
+- 问题3：`memlayout.h` 缺少 `PHYSICAL_MEMORY_END`、`KERNEL_BEGIN_PADDR`、`KERNEL_BEGIN_VADDR` 宏。
 
 **问题解决策略：**
 
-- 针对问题1：[说明如何修改提示词]
-- 针对问题2：[说明如何修改提示词]
+- 骨架依赖问题，无需修改提示词：从 lab2 交付版移植 Best-Fit 实现与 `page_init`，补齐三个宏。
 
-如果没有问题：
+***
+
+##### 第二次迭代
+
+**遇到的问题：**
+
+- 问题1：本机 QEMU 运行无内核输出、无限 page fault（`entry.S` 启动页表只有高地址映射，QEMU 11 下 `csrw satp` 后取指失败）。
+
+**问题解决策略：**
+
+- 给启动页表增加恒等映射（index 2 与 index 511 均映射 PA 0x80000000 的 1G 大页）。
+
+***
+
+##### 第三次迭代
+
+**遇到的问题：**
+
+- 无。按官方评分流程等价模拟（inject.py + `DEFS+=-DGRADE_LAB3_*` + QEMU）三 case 一次通过。
 
 **最终结果：**
 
-经过 [N] 次迭代，该模块最终：
+经过 3 次迭代，该模块最终：
 
 - ✅ 编译通过
-- ✅ 所有相关测试通过
+- ✅ 所有相关测试通过（35/35 + 25/25 + 40/40 = 100/100）
 - ✅ 功能符合预期
 
-**关键改进点总结（如有）：**
+**关键改进点总结：**
 
-1. [改进点1：例如，在 [RELY] 中补充了完整的系统调用号定义]
-2. [改进点2：例如，在 [SPECIFICATION] 中明确了异常处理的边界条件]
-3. [改进点3：例如，增加了对用户指针合法性检查的要求]
-
-***
-
-##### 第二次迭代（如有）
-
-[按照和第一次迭代相同的格式]
-
-***
-
-##### 第三次迭代（如有）
-
-[按照和第一次迭代相同的格式]
+1. 依据“不能假定所有异常使用相同的 epc 偏移量”，实现 `instr_length()` 按指令低 2 位区分 32 位/16 位指令。
+2. 定义 `SHUTDOWN_AFTER 3`，保证 Test 3 在 ticks=200 打印 PASS 后才关机。
+3. 未知中断/异常统一 `print_trapframe(tf)` 输出完整现场。
 
 ***
