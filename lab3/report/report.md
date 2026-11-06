@@ -492,18 +492,24 @@ AI 依据最终提示词直接生成 `interrupt_handler` 与 `exception_handler`
 
 **测试截图：**
 
-![test1测试结果截图](images/test_breakpoint_restore.png)
+对完成更改的代码进行make grade打分操作，结果如下：
 
 在截图1中，该测试验证了 Trap 入口（ `__alltraps` ）与上下文恢复（`RESTORE_ALL`）的正确性。测试触发了断点异常之后成功保存并恢复了完整的寄存器状态（得分为 35/35），证明底层闭环通道已顺利打通。
 
-![test2测试结果截图](images/test_illegal_instruction.png)
+![test1测试结果截图](images/test_breakpoint_restore.png)
 
 在截图2中，该测试验证了非法指令异常的处理逻辑。系统成功捕获异常，并在 C 语言处理函数中正确更新了 `tf->epc`，即跳过了引发异常的指令，使系统返回后未陷入死循环，测试通过（得分为 25/25）。
+
+![test2测试结果截图](images/test_illegal_instruction.png)
+
+在截图3中，该测试验证了时钟中断的持续触发与处理，系统能够稳定地反复进入和退出 Trap，最终结果显示各项测试全部通过，总分达到 100/100。
 
 ![test3测试结果截图](images/test_timer_and_total_score.png)
 
 
-在截图3中，该测试验证了时钟中断的持续触发与处理，系统能够稳定地反复进入和退出 Trap，最终结果显示各项测试全部通过，总分达到 100/100。
+除自动化评测脚本外，通过`make qemu`运行系统观察到，内核在完成初始化后，成功进入时钟中断的循环处理。终端持续输出`100 ticks`的信息，证明系统能够正确处理时钟中断并重新设置下一次中断事件，且 Trap 的恢复机制能够保证内核在执行流中稳定运行，模块一与模块二实现了完美配合。
+![make qemu测试结果截图](images/qemu_timer_output.png)
+
 
 ***
 
