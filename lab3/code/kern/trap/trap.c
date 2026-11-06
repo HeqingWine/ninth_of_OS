@@ -81,7 +81,7 @@ void print_regs(struct pushregs *gpr) {
     cprintf("  t6       0x%08x\n", gpr->t6);
 }
 
-//lab3 function2 YOUR CODE
+//lab3 function2 [2414113]
 #define SHUTDOWN_AFTER 3
 
 /* instr_length - 根据 RISC-V 指令低 2 位判断当前指令长度：
