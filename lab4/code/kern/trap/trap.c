@@ -84,6 +84,61 @@ void print_regs(struct pushregs *gpr)
 extern struct mm_struct *check_mm_struct;
 
 //lab3 请补充你在lab3中的代码
+//lab3 function2 [2414113]
+#define SHUTDOWN_AFTER 3
+
+/* instr_length - 根据 RISC-V 指令低 2 位判断当前指令长度：
+ * bits[1:0] == 3 表示 32 位指令（4 字节），否则为 16 位压缩指令（2 字节） */
+static inline int instr_length(uintptr_t epc) {
+    return ((*(uint16_t *)epc) & 0x3) == 0x3 ? 4 : 2;
+}
+
+/* interrupt_handler - 根据 Trap 原因分类处理中断 */
+void interrupt_handler(struct trapframe *tf) {
+    intptr_t cause = ((intptr_t)tf->cause << 1) >> 1;
+    switch (cause) {
+        case IRQ_S_TIMER:
+            // 重新设置下一次时钟事件，保证时钟中断能够持续产生
+            clock_set_next_event();
+            // 每收到一次时钟中断 ticks 增加一次
+            if (++ticks % TICK_NUM == 0) {
+                // 达到 TICK_NUM 的整数倍时输出统计信息
+                print_ticks();
+                // 累计输出达到 SHUTDOWN_AFTER 次后执行系统关机
+                if (ticks / TICK_NUM >= SHUTDOWN_AFTER) {
+                    sbi_shutdown();
+                }
+            }
+            break;
+        case IRQ_S_SOFT:
+            cprintf("Supervisor software interrupt\n");
+            break;
+        default:
+            // 无法识别的中断：输出提示并打印完整 Trap frame 辅助调试
+            cprintf("Unknown interrupt: cause %d\n", (int)cause);
+            print_trapframe(tf);
+            break;
+    }
+}
+
+/* exception_handler - 根据 Trap 原因分类处理异常 */
+void exception_handler(struct trapframe *tf) {
+    switch (tf->cause) {
+        case CAUSE_ILLEGAL_INSTRUCTION:
+            cprintf("Illegal instruction at 0x%08x\n", tf->epc);
+            // 依据指令长度推进 epc，保证返回后不重复执行触发异常的指令
+            tf->epc += instr_length(tf->epc);
+            break;
+        case CAUSE_BREAKPOINT:
+            cprintf("Breakpoint at 0x%08x\n", tf->epc);
+            tf->epc += instr_length(tf->epc);
+            break;
+        default:
+            // 其他异常：打印完整 Trap frame 辅助调试
+            print_trapframe(tf);
+            break;
+    }
+}
 
 
 
