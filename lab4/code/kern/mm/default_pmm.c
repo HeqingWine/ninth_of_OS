@@ -1,6 +1,6 @@
 #include <pmm.h>
 #include <list.h>
-#include <best_fit_pmm.h>
+#include <default_pmm.h>
 #include <stdio.h>
 
 //lab2 请补充你在lab2中的代码
@@ -267,3 +267,12 @@ best_fit_check(void) {
     #endif
 }
 
+const struct pmm_manager default_pmm_manager = {
+    .name = "best_fit",
+    .init = best_fit_init,
+    .init_memmap = best_fit_init_memmap,
+    .alloc_pages = best_fit_alloc_pages,
+    .free_pages = best_fit_free_pages,
+    .nr_free_pages = best_fit_nr_free_pages,
+    .check = best_fit_check,
+};
