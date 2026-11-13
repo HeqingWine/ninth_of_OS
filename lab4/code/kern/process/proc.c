@@ -373,4 +373,41 @@ proc_init(void)
     set_proc_name(initproc, "init");
 }
 
-//LAB4 function3 YOUR CODE
+//LAB4 function3 [2414113]
+
+// cpu_idle - 空闲线程的执行主体：持续检测调度需求并让出 CPU
+void
+cpu_idle(void)
+{
+    while (1)
+    {
+        if (current->need_resched)
+        {
+            schedule();
+        }
+    }
+}
+
+// proc_run - 在关中断的临界区内完成 current、页表和执行现场的切换
+void
+proc_run(struct proc_struct *proc)
+{
+    if (proc != current)
+    {
+        bool intr_flag;
+        struct proc_struct *prev = current, *next = proc;
+        local_intr_save(intr_flag);
+        {
+            current = next;
+            // 切换页表：所有内核线程共享内核地址空间，pgdir 为 0
+            // 表示尚未建立独立页表（模块二 alloc_proc 置 0），此时沿用
+            // 内核启动页表 boot_pgdir_pa；将来用户进程 pgdir 非 0 时走各自页表。
+            uintptr_t pgdir = (next->pgdir != 0) ? next->pgdir : boot_pgdir_pa;
+            // satp = Sv39 模式位 | 页表根物理地址 >> 12
+            write_csr(satp, ((uintptr_t)SATP_MODE_SV39 << 60) | (pgdir >> RISCV_PGSHIFT));
+            flush_tlb();
+            switch_to(&(prev->context), &(next->context));
+        }
+        local_intr_restore(intr_flag);
+    }
+}

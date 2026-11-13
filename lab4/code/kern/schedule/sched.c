@@ -10,6 +10,52 @@ wakeup_proc(struct proc_struct *proc) {
     proc->state = PROC_RUNNABLE;
 }
 
-//LAB4 function3 YOUR CODE
+//LAB4 function3 [2414113]
+
+// schedule - FIFO + Round-Robin 调度器：
+//   1) 清除 current->need_resched；
+//   2) 从 proc_list 中查找下一个 PROC_RUNNABLE 线程（跳过 idleproc，
+//      它只作兜底，否则一旦切入 idleproc，其 need_resched 已清 0，
+//      会空转等待调度请求导致死锁）：
+//      - current 是 idleproc 时从链表头开始（人人平等）；
+//      - 否则从 current 的下一个节点开始（轮转）；
+//   3) 找不到其他就绪线程时退回 idleproc 保底；
+//   4) next != current 时调用 proc_run 完成切换。
+//   整个选择过程在关中断的临界区内进行，保证原子性。
+void
+schedule(void)
+{
+    bool intr_flag;
+    list_entry_t *le, *last;
+    struct proc_struct *next = NULL;
+
+    local_intr_save(intr_flag);
+    {
+        current->need_resched = 0;
+        last = (current == idleproc) ? &proc_list : &(current->list_link);
+        le = last;
+        do {
+            if ((le = list_next(le)) != &proc_list)
+            {
+                next = le2proc(le, list_link);
+                if (next->state == PROC_RUNNABLE && next != idleproc)
+                {
+                    break;
+                }
+            }
+        } while (le != last);
+
+        if (next == NULL || next->state != PROC_RUNNABLE || next == idleproc)
+        {
+            next = idleproc;
+        }
+        next->runs++;
+        if (next != current)
+        {
+            proc_run(next);
+        }
+    }
+    local_intr_restore(intr_flag);
+}
 
 
