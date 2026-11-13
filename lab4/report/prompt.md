@@ -707,9 +707,10 @@ CSR 宏（`libs/riscv.h`）：`read_csr` `:210-212`、`write_csr` `:214`、`set_
 **需要实现/修改的函数：**
 
 ```c
-// 列出本模块涉及的所有函数签名
-void example_function(void);
-int another_function(int arg);
+void cpu_idle(void);                                     // kern/process/proc.c
+void proc_run(struct proc_struct *proc);                 // kern/process/proc.c
+void schedule(void);                                     // kern/schedule/sched.c
+void switch_to(struct context *from, struct context *to);// kern/process/switch.S
 ```
 
 #### 最终提示词
@@ -717,57 +718,103 @@ int another_function(int arg);
 以下是经过迭代优化后，最终成功实现该功能的提示词：
 
 ```markdown
+[PROMPT]
+编辑proc.c、sched.c、switch.s文件，实现进程调度
 
-[按照提示词模板，给出具体的提示词]
+[RELY]
+可以参考的函数和结构体，包括：`struct proc_struct`、
+`struct context`、`read_csr()`、`write_csr()`等。
+可用接口还包括：`proc_list`、`current`、`idleproc`、`PROC_RUNNABLE`、
+`need_resched`、`runs`、`list_next()`、`le2proc()`、`local_intr_save()`、
+`local_intr_restore()`、`boot_pgdir_pa`、`SATP_MODE_SV39`、`RISCV_PGSHIFT`、
+`flush_tlb()`。`switch_to` 的声明已在 proc.c 中给出：
+`void switch_to(struct context *from, struct context *to);`
 
+[GUARANTEE]
+要求实现的函数：
+cpu_idle()
+schedule()
+proc_run()
+switch_to()
+
+[SPECIFICATION]
+cpu_idle()持续等待调度需求,是闲线程的执行主体，
+schedule()从进程链表中选下一个可执行线程
+proc_run()在安全的临界区内切换当前线程、页表和执行现场
+switch_to()负责最底层的寄存器上下文保存与恢复
+切换过程必须保持原子性。`schedule` 和 `proc_run` 都需要在关键区域内避免被中断打断，否则当前线程、页表和实际执行现场之间可能出现不一致。`schedule` 负责选择正确的 runnable 线程，并在找不到可运行线程时退回 `idleproc`；`proc_run` 负责更新 `current`、切换页表并调用 `switch_to`；`switch_to` 只做上下文保存和恢复，不参与调度策略判断。
+
+补充规格（跨模块契约与调度语义）：
+1. 所有内核线程共享内核地址空间。模块二的 `alloc_proc` 将 `pgdir` 置 0
+   （表示尚未建立独立页表），因此 `proc_run` 中若 `next->pgdir == 0`，
+   必须沿用内核启动页表 `boot_pgdir_pa`，不能把 satp 写成 0；将来用户进程
+   `pgdir` 非 0 时再切换其独立页表。satp 写入形式：
+   `(SATP_MODE_SV39 << 60) | (pgdir >> RISCV_PGSHIFT)`，写后必须 `flush_tlb()`。
+2. `schedule` 查找下一个 `PROC_RUNNABLE` 线程时必须**跳过 idleproc**
+   （idleproc 只作兜底）：一旦切入 idleproc，其 `need_resched` 已被清 0，
+   `cpu_idle` 将空转等待，永远等不到新的调度请求，造成死锁。
+   只有除 idleproc 外找不到其他就绪线程时，才退回 idleproc。
 ```
 
 #### 实现迭代过程
 
-本模块的实现经历了 [N] 次迭代，过程如下：
+本模块的实现经历了 3 次迭代，过程如下：
 
 ***
 
 ##### 第一次迭代
 
-如果设计的prompt生成代码后出现问题：
-
 **遇到的问题：**
 
-- 问题1：问题描述、错误信息和原因分析
-- 问题2：问题描述、错误信息和原因分析
+- 问题1：内核启动后停在 `++ setup timer interrupts`，无任何后续输出，也没有 panic 信息。
+  原因分析：模块二的 `alloc_proc` 将 `pgdir` 初始化为 0（模块二显式假设 A11），
+  而第一版 `proc_run` 无条件执行 `write_csr(satp, Sv39 | (next->pgdir >> 12))`，
+  把 satp 指向物理地址 0 处的"空页表"。切换后下一条指令取指即发生页错误，
+  而 stvec 指向的 trap 入口本身也是虚拟地址，翻译再次失败，陷入页错误死循环，
+  因此屏幕上没有任何输出。
 
 **问题解决策略：**
 
-- 针对问题1：[说明如何修改提示词]
-- 针对问题2：[说明如何修改提示词]
+- 针对问题1：在提示词的 [SPECIFICATION] 中补充跨模块契约（见"补充规格"第 1 条）：
+  明确 `pgdir == 0` 表示内核线程共享内核页表，`proc_run` 此时应写入 `boot_pgdir_pa`。
+  修改 `proc_run` 后，initproc 首次运行链打通，输出
+  `this initproc, pid = 1, name = "init"`、`To U: "Hello world!!".`。
 
-如果没有问题：
+##### 第二次迭代
+
+**遇到的问题：**
+
+- 问题2：官方评分注入测试运行到 `[Test Process Create] PASS` 后卡死，
+  `[Test Schedule] PASS` 与 initproc 的输出消息都不出现，但时钟中断仍在正常打印 `100 ticks`。
+  原因分析：`idleproc` 的 state 也是 `PROC_RUNNABLE`（`test_lab4_process_create` 还专门断言了这一点）。
+  第一版 `schedule` 从 current 的下一个节点轮转时，initproc 的下一个恰好是 idleproc，
+  于是调度器选中 idleproc 并 `proc_run` 切入；而 idleproc 的 `need_resched`
+  在 schedule 开头已被清 0，`cpu_idle` 只能永远空转等待调度请求，
+  整个系统死锁（中断照常响应，所以 ticks 继续增长）。
+
+**问题解决策略：**
+
+- 针对问题2：在提示词的 [SPECIFICATION] 中补充调度语义（见"补充规格"第 2 条）：
+  查找时必须跳过 idleproc，只有找不到其他就绪线程时才退回 idleproc。
+  修改 `schedule` 后，测试线程 thread1/thread2 与 initproc 正常轮转，
+  `[Test Schedule] PASS` 出现。
+
+##### 第三次迭代
 
 **最终结果：**
 
-经过 [N] 次迭代，该模块最终：
+经过 3 次迭代，该模块最终：
 
 - ✅ 编译通过
-- ✅ 所有相关测试通过
+- ✅ 官方评分测试全部通过：`[Test PMM] PASS`、`[Test Process Create] PASS`、`[Test Schedule] PASS`
+- ✅ QEMU 实测 initproc 首次运行链正常：输出 `this initproc, pid = 1, name = "init"`、
+  `To U: "Hello world!!".`，随后 `do_exit` panic（`process exit!!`，预期行为）
 - ✅ 功能符合预期
 
-**关键改进点总结（如有）：**
+**关键改进点总结：**
 
-1. [改进点1：例如，在 [RELY] 中补充了完整的系统调用号定义]
-2. [改进点2：例如，在 [SPECIFICATION] 中明确了异常处理的边界条件]
-3. [改进点3：例如，增加了对用户指针合法性检查的要求]
-
-***
-
-##### 第二次迭代（如有）
-
-[按照和第一次迭代相同的格式]
-
-***
-
-##### 第三次迭代（如有）
-
-[按照和第一次迭代相同的格式]
+1. 在 [RELY] 中补充了 `boot_pgdir_pa`、`SATP_MODE_SV39`、`RISCV_PGSHIFT`、`flush_tlb()` 等模块三可用的接口；
+2. 在 [SPECIFICATION] 中补充了「`pgdir == 0` 时沿用内核启动页表」的跨模块契约；
+3. 在 [SPECIFICATION] 中补充了「idleproc 只作兜底、查找时跳过」的调度语义。
 
 ***
