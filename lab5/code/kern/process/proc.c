@@ -82,42 +82,12 @@ void kernel_thread_entry(void);
 void forkrets(struct trapframe *tf);
 void switch_to(struct context *from, struct context *to);
 
+// 前置声明：这些函数定义在文件后半段，但前面的 lab4 代码需要调用
+static struct proc_struct *alloc_proc(void);
+static void forkret(void);
+static int init_main(void *arg);
+
 //lab4 请补充你在lab4中的代码
-// alloc_proc - 分配一个 proc_struct（PCB），并初始化其所有字段
-static struct proc_struct *
-alloc_proc(void)
-{
-    struct proc_struct *proc = (struct proc_struct *)kmalloc(sizeof(struct proc_struct));
-    if (proc == NULL)
-    {
-        return NULL;
-    }
-    memset(proc, 0, sizeof(struct proc_struct));
-    proc->state = PROC_UNINIT;
-    proc->pid = -1;
-    proc->runs = 0;
-    proc->kstack = 0;
-    proc->need_resched = 0;
-    proc->parent = NULL;
-    proc->mm = NULL;
-    memset(&(proc->context), 0, sizeof(struct context));
-    proc->tf = NULL;
-    proc->pgdir = 0;
-    proc->flags = 0;
-    memset(proc->name, 0, sizeof(proc->name));
-    return proc;
-}
-
-// copy_mm - 根据 clone_flags 为新进程复制或共享 current->mm
-//           本实验阶段尚无用户地址空间，因此仅作占位实现
-static int
-copy_mm(uint32_t clone_flags, struct proc_struct *proc)
-{
-    (void)clone_flags;
-    proc->mm = NULL;
-    return 0;
-}
-
 // copy_thread - 在新进程的内核栈上建立 trapframe 与 context，
 //               使其首次被调度时能够运行 trapframe 中指定的函数
 static void
@@ -139,61 +109,6 @@ copy_thread(struct proc_struct *proc, uintptr_t esp, struct trapframe *tf)
     proc->tf->gpr.a0 = 0;
     proc->context.ra = (uintptr_t)forkret;
     proc->context.sp = (uintptr_t)proc->tf;
-}
-
-// kernel_thread - 以 fn 为入口函数、arg 为参数创建一个内核线程
-int
-kernel_thread(int (*fn)(void *), void *arg, uint32_t clone_flags)
-{
-    struct trapframe tf;
-    memset(&tf, 0, sizeof(struct trapframe));
-    tf.gpr.s0 = (uintptr_t)fn;
-    tf.gpr.s1 = (uintptr_t)arg;
-    tf.status = (read_csr(sstatus) | SSTATUS_SPP | SSTATUS_SPIE) & ~SSTATUS_SIE;
-    tf.epc = (uintptr_t)kernel_thread_entry;
-    return do_fork(clone_flags, 0, &tf);
-}
-
-// do_fork - 根据 clone_flags 创建新的进程/线程
-int
-do_fork(uint32_t clone_flags, uintptr_t stack, struct trapframe *tf)
-{
-    int ret;
-    struct proc_struct *proc;
-    bool intr_flag;
-
-    assert(current != NULL);
-
-    if ((proc = alloc_proc()) == NULL)
-    {
-        return -E_NO_MEM;
-    }
-    proc->parent = current;
-
-    if ((ret = setup_kstack(proc)) != 0)
-    {
-        kfree(proc);
-        return ret;
-    }
-    if ((ret = copy_mm(clone_flags, proc)) != 0)
-    {
-        put_kstack(proc);
-        kfree(proc);
-        return ret;
-    }
-    copy_thread(proc, stack, tf);
-
-    local_intr_save(intr_flag);
-    {
-        proc->pid = get_pid();
-        hash_proc(proc);
-        list_add(&proc_list, &(proc->list_link));
-        nr_process++;
-    }
-    local_intr_restore(intr_flag);
-
-    wakeup_proc(proc);
-    return proc->pid;
 }
 
 // proc_init - 初始化进程管理链表，创建 0 号 idleproc 与 1 号 initproc 并设置 current
