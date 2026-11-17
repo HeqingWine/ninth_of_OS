@@ -88,9 +88,6 @@ size_t nr_free_pages(void)
 }
 
 //lab2 请补充你在lab2中的代码
-#define KERNEL_BEGIN_PADDR 0x80200000
-#define PHYSICAL_MEMORY_END 0x88000000
-
 extern char end[];
 
 static void page_init(void)
@@ -400,23 +397,6 @@ void exit_range(pde_t *pgdir, uintptr_t start, uintptr_t end)
 
 
 //lab4 请补充你在lab4中的代码
-static void page_remove_pte(pde_t *pgdir, uintptr_t la, pte_t *ptep)
-{
-    if (ptep == NULL || !(*ptep & PTE_V))
-    {
-        return;
-    }
-
-    struct Page *page = pte2page(*ptep);
-    if (page_ref_dec(page) == 0)
-    {
-        free_page(page);
-    }
-    *ptep = 0;
-    tlb_invalidate(pgdir, la);
-}
-
-
 int page_insert(pde_t *pgdir, struct Page *page, uintptr_t la, uint32_t perm)
 {
     pte_t *ptep = get_pte(pgdir, la, 1);
