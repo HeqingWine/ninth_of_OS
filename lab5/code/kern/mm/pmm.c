@@ -88,6 +88,84 @@ size_t nr_free_pages(void)
 }
 
 //lab2 请补充你在lab2中的代码
+#define KERNEL_BEGIN_PADDR 0x80200000
+#define PHYSICAL_MEMORY_END 0x88000000
+
+extern char end[];
+
+static void page_init(void)
+{
+    uint64_t mem_base = get_memory_base();
+    uint64_t mem_size = get_memory_size();
+
+    if (mem_base == 0 || mem_size == 0 || mem_base != DRAM_BASE ||
+        (mem_base & (PGSIZE - 1)) != 0 ||
+        mem_size > (~(uint64_t)0) - mem_base)
+    {
+        panic("invalid physical memory range from DTB");
+    }
+
+    uint64_t mem_end = mem_base + mem_size;
+    if (mem_end <= KERNEL_BEGIN_PADDR)
+    {
+        panic("physical memory range does not contain the kernel");
+    }
+
+    cprintf("physical memory map:\n  memory: 0x%016lx, [0x%016lx, 0x%016lx].\n",
+            mem_base, mem_base, mem_end - 1);
+
+    va_pa_offset = PHYSICAL_MEMORY_OFFSET;
+
+    uint64_t managed_end = mem_end;
+    if (managed_end > PHYSICAL_MEMORY_END)
+    {
+        managed_end = PHYSICAL_MEMORY_END;
+    }
+    if (managed_end <= DRAM_BASE)
+    {
+        panic("physical memory range is below the managed memory region");
+    }
+
+    npage = managed_end / PGSIZE;
+    if (npage < nbase)
+    {
+        panic("physical memory range is too small");
+    }
+
+    size_t page_count = npage - nbase;
+    uintptr_t pages_va = ((uintptr_t)end + PGSIZE - 1) & ~(PGSIZE - 1);
+    size_t pages_bytes = page_count * sizeof(struct Page);
+    if (pages_bytes > (~(uintptr_t)0) - pages_va)
+    {
+        panic("Page descriptor array address overflow");
+    }
+    uintptr_t pages_end_va = pages_va + pages_bytes;
+
+    pages = (struct Page *)pages_va;
+
+    for (size_t i = 0; i < page_count; i++)
+    {
+        pages[i].ref = 0;
+        pages[i].flags = 0;
+        pages[i].property = 0;
+        list_init(&pages[i].page_link);
+        SetPageReserved(&pages[i]);
+    }
+
+    uintptr_t pages_end_pa = PADDR(pages_end_va);
+    if (pages_end_pa > managed_end)
+    {
+        panic("Page descriptor array exceeds managed physical memory");
+    }
+
+    uintptr_t free_start_pa = (pages_end_pa + PGSIZE - 1) & ~(PGSIZE - 1);
+    uintptr_t free_end_pa = managed_end & ~(PGSIZE - 1);
+    if (free_start_pa < free_end_pa)
+    {
+        init_memmap(pa2page(free_start_pa),
+                    (free_end_pa - free_start_pa) / PGSIZE);
+    }
+}
 
 // boot_map_segment - setup&enable the paging mechanism
 // parameters
@@ -183,7 +261,7 @@ pte_t *get_pte(pde_t *pgdir, uintptr_t la, bool create)
         set_page_ref(page, 1);
         uintptr_t pa = page2pa(page);
         memset(KADDR(pa), 0, PGSIZE);
-        *pdep1 = pte_create(page2ppn(page), PTE_U | PTE_V);
+        *pdep1 = pte_create(page2ppn(page), PTE_V);
     }
 
     pde_t *pdep0 = &((pde_t *)KADDR(PDE_ADDR(*pdep1)))[PDX0(la)];
@@ -197,7 +275,7 @@ pte_t *get_pte(pde_t *pgdir, uintptr_t la, bool create)
         set_page_ref(page, 1);
         uintptr_t pa = page2pa(page);
         memset(KADDR(pa), 0, PGSIZE);
-        *pdep0 = pte_create(page2ppn(page), PTE_U | PTE_V);
+        *pdep0 = pte_create(page2ppn(page), PTE_V);
     }
     return &((pte_t *)KADDR(PDE_ADDR(*pdep0)))[PTX(la)];
 }
@@ -322,6 +400,56 @@ void exit_range(pde_t *pgdir, uintptr_t start, uintptr_t end)
 
 
 //lab4 请补充你在lab4中的代码
+static void page_remove_pte(pde_t *pgdir, uintptr_t la, pte_t *ptep)
+{
+    if (ptep == NULL || !(*ptep & PTE_V))
+    {
+        return;
+    }
+
+    struct Page *page = pte2page(*ptep);
+    if (page_ref_dec(page) == 0)
+    {
+        free_page(page);
+    }
+    *ptep = 0;
+    tlb_invalidate(pgdir, la);
+}
+
+
+int page_insert(pde_t *pgdir, struct Page *page, uintptr_t la, uint32_t perm)
+{
+    pte_t *ptep = get_pte(pgdir, la, 1);
+    if (ptep == NULL)
+    {
+        return -E_NO_MEM;
+    }
+
+    if (*ptep & PTE_V)
+    {
+        if (pte2page(*ptep) == page)
+        {
+            *ptep = pte_create(page2ppn(page), perm);
+            tlb_invalidate(pgdir, la);
+            return 0;
+        }
+        page_remove_pte(pgdir, la, ptep);
+    }
+
+    page_ref_inc(page);
+    *ptep = pte_create(page2ppn(page), perm);
+    tlb_invalidate(pgdir, la);
+    return 0;
+}
+
+void page_remove(pde_t *pgdir, uintptr_t la)
+{
+    pte_t *ptep = get_pte(pgdir, la, 0);
+    if (ptep != NULL)
+    {
+        page_remove_pte(pgdir, la, ptep);
+    }
+}
 
 
 // invalidate a TLB entry, but only if the page tables being
@@ -393,7 +521,7 @@ static void check_pgdir(void)
     assert((ptep = get_pte(boot_pgdir_va, PGSIZE, 0)) != NULL);
     assert(*ptep & PTE_U);
     assert(*ptep & PTE_W);
-    assert(boot_pgdir_va[0] & PTE_U);
+    assert((boot_pgdir_va[0] & PTE_U) == 0);
     assert(page_ref(p2) == 1);
 
     assert(page_insert(boot_pgdir_va, p1, PGSIZE, 0) == 0);
