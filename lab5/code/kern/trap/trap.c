@@ -133,6 +133,7 @@ void interrupt_handler(struct trapframe *tf) {
     }
 }
 
+//lab5 function1 [2413094] update exception_handler
 /* exception_handler - 根据 Trap 原因分类处理异常 */
 void exception_handler(struct trapframe *tf) {
     switch (tf->cause) {
@@ -145,14 +146,19 @@ void exception_handler(struct trapframe *tf) {
             cprintf("Breakpoint at 0x%08x\n", tf->epc);
             tf->epc += instr_length(tf->epc);
             break;
+        case CAUSE_USER_ECALL:  //lab5 function1 [2413094] update exception_handler
+            // 用户态系统调用：先推进 epc 到下一条指令，再进入 syscall 分发；
+            // sys_exec 成功后 load_icode 会用用户入口重写 tf->epc，
+            // 因此必须先加 4 再调用 syscall()
+            tf->epc += 4;
+            syscall();
+            break;
         default:
             // 其他异常：打印完整 Trap frame 辅助调试
             print_trapframe(tf);
             break;
     }
 }
-
-//lab5 function1 YOUR CODE update exception_handler
 
 
 static inline void trap_dispatch(struct trapframe *tf)
