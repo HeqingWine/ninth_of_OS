@@ -190,7 +190,33 @@ proc_run(struct proc_struct *proc)
 
 
 
-//lab5 function2 YOUR CODE update alloc_proc
+//lab5 function2 [2411617]
+// update alloc_proc
+// alloc_proc - alloc a proc_struct and init all fields of proc_struct
+static struct proc_struct *
+alloc_proc(void)
+{
+    struct proc_struct *proc = kmalloc(sizeof(struct proc_struct));
+    if (proc != NULL)
+    {
+        memset(proc, 0, sizeof(struct proc_struct));
+        proc->state = PROC_UNINIT;
+        proc->pid = -1;
+        proc->runs = 0;
+        proc->kstack = 0;
+        proc->need_resched = 0;
+        proc->parent = NULL;
+        proc->mm = NULL;
+        proc->tf = NULL;
+        proc->pgdir = 0;
+        proc->flags = 0;
+        memset(proc->name, 0, sizeof(proc->name));
+        proc->exit_code = 0;
+        proc->wait_state = 0;
+        proc->cptr = proc->yptr = proc->optr = NULL;
+    }
+    return proc;
+}
 
 
 // set_proc_name - set the name of proc
@@ -334,7 +360,20 @@ find_proc(int pid)
     return NULL;
 }
 
-//lab5 function2 YOUR CODE update kernel_thread
+//lab5 function2 [2411617]
+// update kernel_thread
+// kernel_thread - create a kernel thread using `kernel_thread_entry`
+int kernel_thread(int (*fn)(void *), void *arg, uint32_t clone_flags)
+{
+    struct trapframe tf;
+    memset(&tf, 0, sizeof(struct trapframe));
+    tf.gpr.s0 = (uintptr_t)fn;
+    tf.gpr.s1 = (uintptr_t)arg;
+    // 新线程初始运行在 S 态，进入 kernel_thread_entry 后调用 fn(arg)
+    tf.status = (read_csr(sstatus) | SSTATUS_SPP | SSTATUS_SPIE) & ~SSTATUS_SIE;
+    tf.epc = (uintptr_t)kernel_thread_entry;
+    return do_fork(clone_flags, 0, &tf);
+}
 
 
 // setup_kstack - alloc pages with size KSTACKPAGE as process kernel stack
@@ -384,7 +423,107 @@ put_pgdir(struct mm_struct *mm)
 
 
 
-//lab5 function2 YOUR CODE
+//lab5 function2 [2411617]
+static int user_main(void *arg);
+
+// init_main - the second kernel thread used to create user_main kernel threads
+static int
+init_main(void *arg)
+{
+    (void)arg;
+    size_t nr_free_pages_store = nr_free_pages();
+    size_t kernel_allocated_store = kallocated();
+
+    int pid = kernel_thread(user_main, NULL, 0);
+    if (pid <= 0)
+    {
+        panic("create user_main failed.\n");
+    }
+
+    while (do_wait(0, NULL) == 0)
+    {
+        schedule();
+    }
+
+    cprintf("all user-mode processes have quit.\n");
+    assert(nr_free_pages_store == nr_free_pages());
+    assert(kernel_allocated_store == kallocated());
+    cprintf("init check memory pass.\n");
+    return 0;
+}
+
+// do_wait - wait one OR any children with PROC_ZOMBIE, and return its exit code
+int
+do_wait(int pid, int *code_store)
+{
+    struct proc_struct *proc;
+    bool intr_flag;
+    bool haskid;
+    if (code_store != NULL)
+    {
+        if (!user_mem_check(current->mm, (uintptr_t)code_store, sizeof(int), 1))
+        {
+            return -E_INVAL;
+        }
+    }
+
+repeat:
+    haskid = 0;
+    if (pid != 0)
+    {
+        proc = find_proc(pid);
+        if (proc != NULL && proc->parent == current)
+        {
+            haskid = 1;
+            if (proc->state == PROC_ZOMBIE)
+            {
+                goto found;
+            }
+        }
+    }
+    else
+    {
+        for (proc = current->cptr; proc != NULL; proc = proc->optr)
+        {
+            haskid = 1;
+            if (proc->state == PROC_ZOMBIE)
+            {
+                goto found;
+            }
+        }
+    }
+    if (!haskid)
+    {
+        return -E_BAD_PROC;
+    }
+    current->state = PROC_SLEEPING;
+    current->wait_state = WT_CHILD;
+    schedule();
+    if (current->flags & PF_EXITING)
+    {
+        do_exit(-E_KILLED);
+    }
+    goto repeat;
+
+found:
+    if (proc == idleproc || proc == initproc)
+    {
+        panic("wait idleproc or initproc.\n");
+    }
+    if (code_store != NULL)
+    {
+        *code_store = proc->exit_code;
+    }
+    local_intr_save(intr_flag);
+    {
+        unhash_proc(proc);
+        remove_links(proc);
+    }
+    local_intr_restore(intr_flag);
+    put_kstack(proc);
+    kfree(proc);
+    return 0;
+}
 
 
 //lab5 function3 YOUR CODE
@@ -414,7 +553,233 @@ put_pgdir(struct mm_struct *mm)
 #define KERNEL_EXECVE2(x, xstart, xsize) __KERNEL_EXECVE2(x, xstart, xsize)
 
 
-//lab5 function2 YOUR CODE
+//lab5 function2 [2411617]
+// load_icode - load the elf binary into current process's address space
+static int
+load_icode(unsigned char *binary, size_t size)
+{
+    if (current->mm != NULL)
+    {
+        panic("load_icode: current->mm must be empty.\n");
+    }
 
+    int ret = -E_NO_MEM;
+    struct mm_struct *mm = mm_create();
+    if (mm == NULL)
+    {
+        return -E_NO_MEM;
+    }
 
+    if ((ret = setup_pgdir(mm)) != 0)
+    {
+        mm_destroy(mm);
+        return ret;
+    }
 
+    // 校验 ELF 头与程序头表
+    struct elfhdr elf;
+    if (size < sizeof(struct elfhdr))
+    {
+        ret = -E_INVAL_ELF;
+        goto bad_elf;
+    }
+    memcpy(&elf, binary, sizeof(struct elfhdr));
+    if (elf.e_magic != ELF_MAGIC)
+    {
+        ret = -E_INVAL_ELF;
+        goto bad_elf;
+    }
+    if (elf.e_phentsize != sizeof(struct proghdr) ||
+        elf.e_phoff + (uint64_t)elf.e_phnum * elf.e_phentsize > (uint64_t)size)
+    {
+        ret = -E_INVAL_ELF;
+        goto bad_elf;
+    }
+
+    uint32_t i, perm;
+    uint32_t vm_flags;
+    for (i = 0; i < elf.e_phnum; i++)
+    {
+        struct proghdr ph;
+        memcpy(&ph, binary + elf.e_phoff + i * elf.e_phentsize,
+               sizeof(struct proghdr));
+        if (ph.p_type != ELF_PT_LOAD || ph.p_memsz == 0)
+        {
+            continue;
+        }
+        if (ph.p_filesz > ph.p_memsz || ph.p_offset + ph.p_filesz > size)
+        {
+            ret = -E_INVAL_ELF;
+            goto failed_cleanup;
+        }
+
+        vm_flags = 0;
+        perm = PTE_U;
+        if (ph.p_flags & ELF_PF_R)
+        {
+            vm_flags |= VM_READ;
+            perm |= PTE_R;
+        }
+        if (ph.p_flags & ELF_PF_W)
+        {
+            vm_flags |= VM_WRITE;
+            perm |= PTE_W;
+        }
+        if (ph.p_flags & ELF_PF_X)
+        {
+            vm_flags |= VM_EXEC;
+            perm |= PTE_X;
+        }
+        if (vm_flags & VM_WRITE)
+        {
+            vm_flags |= VM_READ;
+        }
+        if (perm & PTE_W)
+        {
+            perm |= PTE_R;
+        }
+
+        if ((ret = mm_map(mm, ph.p_va, ph.p_memsz, vm_flags, NULL)) != 0)
+        {
+            goto failed_cleanup;
+        }
+
+        // 按页装载：整页清零后拷贝文件内容，剩余部分作为 BSS
+        uintptr_t la = ROUNDDOWN(ph.p_va, PGSIZE);
+        uintptr_t end = ROUNDUP(ph.p_va + ph.p_memsz, PGSIZE);
+        for (; la < end; la += PGSIZE)
+        {
+            struct Page *page = pgdir_alloc_page(mm->pgdir, la, perm);
+            if (page == NULL)
+            {
+                ret = -E_NO_MEM;
+                goto failed_cleanup;
+            }
+            memset(page2kva(page), 0, PGSIZE);
+            uintptr_t s = (la > ph.p_va) ? la : ph.p_va;
+            uintptr_t e = la + PGSIZE;
+            uintptr_t file_end = ph.p_va + ph.p_filesz;
+            if (e > file_end)
+            {
+                e = file_end;
+            }
+            if (s < e)
+            {
+                memcpy(page2kva(page) + (s - la),
+                       binary + ph.p_offset + (s - ph.p_va), e - s);
+            }
+        }
+    }
+
+    // 建立用户栈及其 vma
+    if ((ret = mm_map(mm, USTACKTOP - USTACKSIZE, USTACKSIZE,
+                      VM_READ | VM_WRITE | VM_STACK, NULL)) != 0)
+    {
+        goto failed_cleanup;
+    }
+    for (i = 0; i < USTACKPAGE; i++)
+    {
+        if (pgdir_alloc_page(mm->pgdir, USTACKTOP - (i + 1) * PGSIZE,
+                             PTE_U | PTE_R | PTE_W) == NULL)
+        {
+            ret = -E_NO_MEM;
+            goto failed_cleanup;
+        }
+    }
+
+    // 接管新地址空间
+    mm_count_inc(mm);
+    current->mm = mm;
+    current->pgdir = PADDR(mm->pgdir);
+    write_csr(satp, ((uintptr_t)SATP_MODE_SV39 << 60) |
+                        (current->pgdir >> RISCV_PGSHIFT));
+    flush_tlb();
+
+    // 改写当前进程的 trapframe，使其 sret 后进入用户程序
+    struct trapframe *tf = current->tf;
+    memset(tf, 0, sizeof(struct trapframe));
+    tf->status = (read_csr(sstatus) & ~(SSTATUS_SPP | SSTATUS_SIE)) | SSTATUS_SPIE;
+    tf->epc = elf.e_entry;
+    tf->gpr.sp = USTACKTOP;
+    return 0;
+
+bad_elf:
+    put_pgdir(mm);
+    mm_destroy(mm);
+    return ret;
+
+failed_cleanup:
+    exit_mmap(mm);
+    put_pgdir(mm);
+    mm_destroy(mm);
+    return ret;
+}
+
+// do_execve - free current mm, then load the elf binary and run it
+int
+do_execve(const char *name, size_t len, unsigned char *binary, size_t size)
+{
+    struct mm_struct *mm = current->mm;
+
+    if (mm != NULL && !user_mem_check(mm, (uintptr_t)name, len, 0))
+    {
+        return -E_INVAL;
+    }
+
+    // 名字截断到 PROC_NAME_LEN，并保证 NUL 结尾
+    char local_name[PROC_NAME_LEN + 1];
+    memset(local_name, 0, sizeof(local_name));
+    memcpy(local_name, name, (len < PROC_NAME_LEN) ? len : PROC_NAME_LEN);
+
+    if (mm != NULL)
+    {
+        // 回收旧用户地址空间前先切回内核页表
+        write_csr(satp, ((uintptr_t)SATP_MODE_SV39 << 60) |
+                            (boot_pgdir_pa >> RISCV_PGSHIFT));
+        flush_tlb();
+        if (mm_count_dec(mm) == 0)
+        {
+            exit_mmap(mm);
+            put_pgdir(mm);
+            mm_destroy(mm);
+        }
+        current->mm = NULL;
+        current->pgdir = 0;
+    }
+
+    int ret = load_icode(binary, size);
+    if (ret != 0)
+    {
+        do_exit(ret);
+        return ret;
+    }
+    set_proc_name(current, local_name);
+    return 0;
+}
+
+// kernel_execve - do the sys_exec work in kernel, then return to user mode
+static int
+kernel_execve(const char *name, unsigned char *binary, size_t size)
+{
+    int ret = do_execve(name, strlen(name) + 1, binary, size);
+    if (ret != 0)
+    {
+        return ret;
+    }
+    // load_icode 已把 current->tf 改成用户态入口现场，经 trap 返回路径进入 U 态
+    forkrets(current->tf);
+    panic("kernel_execve: forkrets returned.\n");
+}
+
+// user_main - kernel thread used to exec a user program
+static int
+user_main(void *arg)
+{
+    (void)arg;
+#ifdef TEST
+    KERNEL_EXECVE2(TEST, TESTSTART, TESTSIZE);
+#else
+    KERNEL_EXECVE(hello);
+#endif
+    panic("user_main execve failed.\n");
+}
