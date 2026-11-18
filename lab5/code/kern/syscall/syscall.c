@@ -81,7 +81,7 @@ sys_wait(uint64_t arg[])
     int pid = (int)arg[0];
     int *store = (int *)arg[1];
 
-    if (store != NULL && !user_mem_check(current->mm, (uintptr_t)store, sizeof(int), true))
+    if (store != NULL && !user_mem_check(current->mm, (uintptr_t)store, sizeof(int), 1))
     {
         return -E_INVAL;
     }
@@ -97,12 +97,12 @@ sys_exec(uint64_t arg[])
     size_t size = (size_t)arg[3];
 
     if (name == NULL || (uintptr_t)name + len < (uintptr_t)name ||
-        !user_mem_check(current->mm, (uintptr_t)name, len, false))
+        !user_mem_check(current->mm, (uintptr_t)name, len, 0))
     {
         return -E_INVAL;
     }
     if (binary == NULL || (uintptr_t)binary + size < (uintptr_t)binary ||
-        !user_mem_check(current->mm, (uintptr_t)binary, size, false))
+        !user_mem_check(current->mm, (uintptr_t)binary, size, 0))
     {
         return -E_INVAL;
     }
