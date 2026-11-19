@@ -121,6 +121,11 @@ void interrupt_handler(struct trapframe *tf) {
                     sbi_shutdown();
                 }
             }
+            // 时间片轮转：每次时钟中断都标记当前进程需要重新调度，
+            // 否则用户态死循环进程会永远占据 CPU
+            if (current != NULL) {
+                current->need_resched = 1;
+            }
             break;
         case IRQ_S_SOFT:
             cprintf("Supervisor software interrupt\n");

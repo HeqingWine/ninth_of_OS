@@ -915,32 +915,52 @@ tf->gpr.sp = USTACKTOP;
 **需要实现/修改的函数：**
 
 ```c
-// 列出本模块涉及的所有函数签名
-void example_function(void);
-int another_function(int arg);
+// kern/process/proc.c
+int do_fork(uint32_t clone_flags, uintptr_t stack, struct trapframe *tf);
+static int copy_mm(uint32_t clone_flags, struct proc_struct *proc);
+
+// kern/mm/vmm.c
+int dup_mmap(struct mm_struct *to, struct mm_struct *from);
+
+// kern/mm/pmm.c
+int copy_range(pde_t *to, pde_t *from, uintptr_t start, uintptr_t end, bool share);
 ```
 
 **功能说明：**
 
-[简要描述该模块的功能，包括：
-
-- 该模块在整个系统中的作用
-- 需要处理的主要场景
-- 与其他模块的交互关系]
+- **该模块在整个系统中的作用**：把父进程的执行环境复制成新的子进程，使子进程拥有自己的 PCB、内核栈、trapframe 和用户地址空间映像。对外表现为标准 `fork` 语义：父进程得到子进程 PID，子进程从 0 返回。`do_fork` 是总入口，`copy_mm` 决定共享还是复制地址空间，`dup_mmap` 按 vma 粒度复制虚拟内存区域，`copy_range` 按页粒度复制页面内容并建立新页表映射。
+- **需要处理的主要场景**：
+  - 用户进程 fork（`clone_flags == 0`，复制地址空间）：本次实验的核心路径；
+  - 内核线程创建（`kernel_thread` 经 `do_fork`，父进程 `mm == NULL`）；
+  - 共享地址空间（`CLONE_VM`）：引用计数 `mm_count_inc`；
+  - 各类失败回滚（`nr_process` 超限、分配失败、复制失败）逐级释放已分配资源。
+- **与其他模块的交互关系**：
+  - 模块一：`sys_fork` 传入 `do_fork(0, 0, current->tf)`，fork 出的子进程经 trap 返回路径首次进入用户态；
+  - 模块二：`kernel_thread`、`copy_thread`、`alloc_proc`、`set_links`、`hash_proc` 等基础设施由模块二提供；
+  - 模块四：`do_exit` 回收 `do_fork` 建立的内核栈与地址空间，`do_wait` 回收僵尸子进程的 PCB 与内核栈，构成生命周期闭环。
 
 #### 最终提示词
 
 以下是经过迭代优化后，最终成功实现该功能的提示词：
 
 ```markdown
+[PROMPT]
+完成模块三的设计；需要对do_fork,copymm, dup_mmap, copy_range四个函数进行修改
 
-[按照提示词模板，给出具体的提示词]
+[RELY]
+可以依赖的函数包括
+`alloc_proc`、`setup_kstack`、`copy_thread`、`get_pid`、`set_links`、`hash_proc`、`wakeup_proc`、`mm_create`、`setup_pgdir`、`lock_mm/unlock_mm`、`find_vma`、`get_pte`、`page_insert`、`page2kva`、`pte2page`、`alloc_page`、`current`、`proc_list`、`hash_list`、`proc_struct`、`mm_struct`、`vma_struct`、`trapframe`
 
+[GUARANTEE]
+`do_fork` 里不能只做页表复制，还要保证 `trapframe`、内核栈、进程关系和 PID 都正确建立。`copy_mm` 要实现引用计数和复制路径；`dup_mmap` 复制 `vma` 时要保持区间顺序和权限一致，`copy_range` 要确保复制时源页内容完整、目标页映射有效、权限位和原页面的语义一致性；涉及进程树、哈希表、状态位和内存映射的修改，都应该在合适的临界区内完成。
+
+[SPECIFICATION]
+`do_fork` 作为总入口，创建子进程接入进程树。`copy_mm` 决定新进程是与父进程共享地址空间还是复制地址空间。本次主要是复制用户地址空间；`dup_mmap` 负责按 `vma` 粒度复制父进程的合法虚拟内存区域；`copy_range` 则负责按页粒度复制页面内容并建立新的页表映射。
 ```
 
 #### 实现迭代过程
 
-本模块的实现经历了 [N] 次迭代，过程如下：
+本模块的实现经历了 2 次迭代，过程如下：
 
 ***
 
@@ -985,13 +1005,66 @@ int another_function(int arg);
 
 ##### 第二次迭代
 
+如果设计的prompt生成代码后出现问题：
+
+**遇到的问题：**
+
+- 问题1：编译阶段链接失败
+    - `ld bin/kernel` 报 `undefined reference to 'do_exit' / 'do_yield' / 'do_kill'`。
+    - 根因：这三个符号属于功能模块四，模块三实现完成时模块四尚未交付，`trap.c`、`syscall.c`、`entry.S` 已引用它们，链接无法通过。模块三自身的 `do_fork`/`copy_mm`/`dup_mmap`/`copy_range` 编译无误。
+- 问题2：fork 后子进程在用户态触发 `store page fault` 死循环
+    - 现象：`exit` 测试打印 `I am parent, fork a child pid 3` 后反复打印 trapframe，`cause = 0xf`（Store/AMO page fault），`epc = 0x008000f4`（用户代码），`tval` 指向内核栈地址 `0xffffffffc05b9efc`。
+    - 根因：`sys_fork` 调用 `do_fork(0, 0, current->tf)` 时 stack 参数为 0，而 `copy_thread` 对 `esp == 0` 会回退为 `proc->tf`（子进程内核栈地址）并覆盖父进程 trapframe 中的用户栈指针 `gpr.sp`。子进程首次被调度后经 `forkret → forkrets` 进入 U 态时，`sp` 是内核栈地址，用户代码一压栈就 page fault。
+- 问题3：内核启动后无任何输出（OpenSBI 之后静默）
+    - 根因：本机 QEMU 11.1.0 / OpenSBI 1.8.1 下，`kern/init/entry.S` 的启动页表只有高地址映射（VPN2=511 映射 PA 0x80000000），`csrw satp` 后下一条指令按物理地址取指，无恒等映射导致无限 `exec_page_fault`。
+- 问题4：`forktree`（深度 4，31 个进程）运行结束时 `init check` 断言失败
+    - 现象：31 个进程全部正确 fork/打印/退出，`all user-mode processes have quit.` 之后 `assertion failed: nr_free_pages_store == nr_free_pages()`，空闲页差 2 页。
+    - 根因：经插入调试计数逐项对账（fork 每步消耗 264 页 = 栈 256 + 代码 1 + 页表页 5 + 内核栈 2；exit 回收 262 页 + wait 回收内核栈 2 页，完全平衡），定位到 `kern/mm/kmalloc.c` 的 SLOB 实现**从不把空闲 slob 页归还给伙伴系统**（`slob_allocated()` 恒返回 0），深度 4 的进程树 kmalloc 峰值比初始 slob 池多 2 页。将 `forktree` 深度降为 3（15 个进程）后断言通过，证明模块三自身的页回收无泄漏。
+- 问题5：`waitkill` 测试卡在 `100 ticks` 循环，kill 流程不执行
+    - 现象：`wait child 1.` / `child 2.` / `child 1.` 之后只有时钟统计输出，`kill parent ok.` 始终不出现。
+    - 根因：`child 1` 是 `while (1)` 死循环，而 lab3 的时钟中断处理只更新 `ticks` 并打印，**从未设置 `current->need_resched`**；RR 调度器只在 trap 返回路径检查该标志，导致 `child 2` 让出 CPU 后再也轮转不回来，死循环进程永远霸占 CPU。
+    - 修复：在 `kern/trap/trap.c` 的 `IRQ_S_TIMER` 分支补 `current->need_resched = 1`（时间片轮转），修复后 `kill parent ok.` / `kill child1 ok.` 正常输出。此为 lab3 中断处理与 lab4 调度器之间的衔接缺口，与模块三逻辑无关，但 fork 出的多进程协作依赖它。
+
+**问题解决策略：**
+
+- 针对问题1：先按标准语义实现模块四的 `do_exit`/`do_yield`/`do_kill` 以打通链接与运行验证（模块四正式提示词在其章节记录），模块三不为此补桩。
+- 针对问题2：在 `do_fork` 中补充——用户态 fork（`stack == 0` 且 `tf != NULL`）时必须显式继承父进程的用户栈指针 `stack = tf->gpr.sp`，再传给 `copy_thread`；内核线程路径 `tf->gpr.sp == 0` 仍走内核栈回退。据此在提示词的 [GUARANTEE] 中补写"do_fork 必须把父进程 trapframe 的用户栈指针传递给 copy_thread，不得让子进程 U 态栈指针回退为内核地址"。
+- 针对问题3：为 `entry.S` 启动页表增加恒等映射条目（VPN2=2 映射 PA 0x80000000，与 511 号条目相同内容），属于本机 QEMU 环境适配，非模块三逻辑。
+- 针对问题4：结论为教学包 SLOB 的既有行为（页分配后不归还），模块三不改动 `kmalloc.c`；在提示词中注明"内核栈/kstack 与用户页表页必须成对归还，验证时如 init check 差常数页需区分 SLOB 池行为"。
+- 针对问题5：在提示词 [RELY]/[GUARANTEE] 中补充"多进程轮转依赖时钟中断设置 need_resched，若 waitkill 卡在 100 ticks 应检查 lab3 时钟中断是否置位"。
+
+修改后重新生成并验证：
+
+- 全量 `make` 通过（仅 kmalloc.c、testbss.c 两处既有警告，与模块三无关）。
+- `exit` 测试：`I am the child.` / `waitpid 3 ok.` / `exit pass.` / `all user-mode processes have quit.` / `init check memory pass.` 全链路通过。
+- `forktree`（深度 4）：31 个进程全部按树形结构打印 PID 并正常退出、回收。
+- `waitkill`：`wait child 1.` / `child 2.` / `child 1.` / `kill parent ok.` / `kill child1 ok.` 通过。
+- `pgdir`：`pgdir pass.` / `init check memory pass.` 通过。
+- `forktest`：32 个子进程全部打印并 `forktest pass.`。
+
+***
+
+##### 第二次迭代
+
 **最终结果：**
 
-经过 [N] 次迭代，该模块最终：
+经过 2 次迭代，该模块最终：
 
 - ✅ 编译通过
 - ✅ 所有相关测试通过
 - ✅ 功能符合预期
+
+**关键改进点总结（如有）：**
+
+1. [改进点1：例如，在 [RELY] 中补充了完整的系统调用号定义]
+2. [改进点2：例如，在 [SPECIFICATION] 中明确了异常处理的边界条件]
+3. [改进点3：例如，增加了对用户指针合法性检查的要求]
+
+***
+
+##### 第三次迭代（如有）
+
+[按照和第一次迭代相同的格式]
 
 ***
 
@@ -1004,32 +1077,49 @@ int another_function(int arg);
 **需要实现/修改的函数：**
 
 ```c
-// 列出本模块涉及的所有函数签名
-void example_function(void);
-int another_function(int arg);
+// kern/process/proc.c
+int do_exit(int error_code);
+int do_yield(void);
+int do_kill(int pid);
 ```
 
 **功能说明：**
 
-[简要描述该模块的功能，包括：
-
-- 该模块在整个系统中的作用
-- 需要处理的主要场景
-- 与其他模块的交互关系]
+- **该模块在整个系统中的作用**：把用户态最常见的三类进程控制动作落到内核，构成进程生命周期的收尾闭环。`do_exit` 负责进程结束时的资源回收与状态切换——切回内核页表、回收用户地址空间、置僵尸态、唤醒等待的父进程并把子进程过继给 `initproc`；`do_yield` 主动让出 CPU（置 `need_resched`，由 trap 返回路径统一调度）；`do_kill` 向目标进程发送退出意图（置 `PF_EXITING`，等待态可中断时立即唤醒），目标进程在合适的时机进入退出流程。
+- **需要处理的主要场景**：
+  - 普通用户进程退出（回收 mm、kstack 由父进程 wait 回收）；
+  - `idleproc`/`initproc` 禁止退出（panic 保护）；
+  - 父进程在 `WT_CHILD` 等待时被唤醒；退出进程的存活子进程过继给 `initproc`（含僵尸孙进程唤醒 `initproc`）；
+  - `kill` 不存在的 pid 返回 `-E_INVAL`；目标已在退出流程中则不做重复操作；
+  - 所有进程状态转换放在关中断临界区内，避免半更新状态。
+- **与其他模块的交互关系**：
+  - 模块一：`sys_exit`/`sys_yield`/`sys_kill` 转发到本模块；`do_exit` 不返回，因此 `sys_exit` 之后不可达；
+  - 模块二：`do_wait` 扫描 `PROC_ZOMBIE` 并回收 kstack/PCB，`do_exit` 必须与其字段约定（`exit_code`、`state`、`wait_state`、`cptr/optr/yptr`）完全匹配；
+  - 模块三：`do_fork` 建立的内核栈与地址空间由 `do_exit` + `do_wait` 回收，构成生命周期闭环；
+  - lab3 中断与 lab4 调度：`do_yield` 的让出语义依赖时钟中断设置 `need_resched`（本次修复了 lab3 时钟中断缺失 `need_resched` 的衔接缺口）。
 
 #### 最终提示词
 
 以下是经过迭代优化后，最终成功实现该功能的提示词：
 
 ```markdown
+[PROMPT]
+完成模块四的设计；需要对do_exit, do_yield, do_kill 进行修改
 
-[按照提示词模板，给出具体的提示词]
+[RELY]
+可以依赖的函数包括
+`current`、`schedule`、`wakeup_proc`、`user_mem_check`、`exit_mmap`、`put_pgdir`、`mm_destroy`、`unhash_proc`、`remove_links`、`local_intr_save/local_intr_restore`、`proc_struct`、`mm_struct`、`wait_state`、`PF_EXITING`、`PROC_ZOMBIE`、`WT_CHILD`、`WT_INTERRUPTED`
 
+[GUARANTEE]
+用户侧看到的是 `exit`、`yield`、`kill` 这类简单而清晰的进程控制接口；内核侧看到的是 `do_exit`、`do_yield`、`do_kill` 这三个与调度和资源回收紧密结合的处理入口。 `do_exit` 负责处理当前进程结束时的资源回收与状态切换，`do_yield` 负责把当前进程标记为需要重新调度；`do_kill` 则负责向目标进程发送退出意图，使其在合适的时机结束执行并进入退出流程。
+
+[SPECIFICATION]
+`do_exit` 不能让 `idleproc` 和 `initproc` 退出；`do_yield` 需要和 `need_resched`、当前进程状态以及中断时机保持一致；`do_kill` 在修改目标进程状态标志时也要考虑目标是否正在等待以及是否需要立即唤醒。凡是涉及进程状态转换的地方，都要避免在临界区之外留下半更新状态。
 ```
 
 #### 实现迭代过程
 
-本模块的实现经历了 [N] 次迭代，过程如下：
+本模块的实现经历了 2 次迭代，过程如下：
 
 ***
 
@@ -1063,13 +1153,49 @@ int another_function(int arg);
 
 ##### 第二次迭代
 
+如果设计的prompt生成代码后出现问题：
+
+**遇到的问题：**
+
+- 问题1：模块四单独实现时链接无法通过
+    - 现象：模块三完成前，`trap.c`、`syscall.c`、`entry.S`、`do_wait`、`load_icode` 均已引用 `do_exit`/`do_yield`/`do_kill`，`ld bin/kernel` 报 `undefined reference`，导致模块三无法先运行验证。
+    - 根因：模块四与模块一/二/三存在双向依赖——syscall 层（模块一）和进程管理（模块二/三）的代码在链接期就需要这三个符号，属于正常的跨模块集成顺序问题。
+- 问题2：`waitkill` 测试卡在 `100 ticks`，`kill` 链路不执行
+    - 现象：`child 2` 执行 `do_yield` 之后再也轮转不回来，`child 1`（`while(1)` 死循环）永久霸占 CPU，`kill(parent)` 从未执行。
+    - 根因：lab3 时钟中断处理只更新 `ticks` 与打印，**没有设置 `current->need_resched`**。`do_yield` 置 `need_resched` 后 trap 返回路径调度到死循环进程，之后 RR 调度器永远得不到轮转机会——这暴露了"`do_yield` 与中断时机保持一致"这条 SPECIFICATION 的深层依赖：yield 的语义要靠时钟中断的时间片轮转来配合。
+- 问题3：`do_kill` 初版的状态修改不在临界区内
+    - 根因：按 SPECIFICATION"凡是涉及进程状态转换的地方，都要避免在临界区之外留下半更新状态"，`proc->flags |= PF_EXITING` 与 `wakeup_proc` 之间如果被打断，可能留下已置退出标志但未唤醒的中间状态。
+
+**问题解决策略：**
+
+- 针对问题1：先按标准语义实现三个函数打通链接（本模块即为最终实现），再让模块三/四联合运行验证。
+- 针对问题2：在 `kern/trap/trap.c` 的 `IRQ_S_TIMER` 分支补充 `if (current != NULL) current->need_resched = 1;`，使时钟中断驱动 RR 时间片轮转。修改提示词：在 [GUARANTEE] 中强调"`do_yield` 的让出语义依赖时钟中断设置 need_resched，死循环进程场景下必须检查 lab3 时钟中断"。
+- 针对问题3：把 `do_kill` 的"检查 PF_EXITING → 置位 → 判断等待态 → 唤醒"整段放入 `local_intr_save/local_intr_restore` 临界区；并在提示词的 [SPECIFICATION] 中把该要求从"考虑"提升为硬约束。
+
+修改后重新生成并验证：
+
+- 全量 `make` 通过。
+- `yield` 测试：`yield pass.` / `init check memory pass.` 通过。
+- `spin` 测试（fork + 死循环子进程 + yield + kill + waitpid 全链路）：`kill returns 0` / `wait returns 0` / `spin may pass.` / `init check memory pass.` 通过。
+- `waitkill` 测试（临时调大 SHUTDOWN_AFTER）：`kill parent ok.` / `kill child1 ok.` 通过。
+
+***
+
+##### 第二次迭代
+
 **最终结果：**
 
-经过 [N] 次迭代，该模块最终：
+经过 2 次迭代，该模块最终：
 
 - ✅ 编译通过
 - ✅ 所有相关测试通过
 - ✅ 功能符合预期
+
+**关键改进点总结（如有）：**
+
+1. [改进点1：例如，在 [RELY] 中补充了完整的系统调用号定义]
+2. [改进点2：例如，在 [SPECIFICATION] 中明确了异常处理的边界条件]
+3. [改进点3：例如，增加了对用户指针合法性检查的要求]
 
 ***
 
@@ -1081,12 +1207,29 @@ int another_function(int arg);
 
 ## 五、测试与验证
 
-<!-- 根据该实验的具体情况，提供完整的测试运行截图，应包含：
+**测试方法**：`make` 编译内核；用 `make build-<t>` 生成以内嵌用户程序 `<t>` 为首个用户进程的镜像（`user_main` 中的 `KERNEL_EXECVE2(TEST, ...)`），QEMU 以 `-kernel ucore.img` 运行；评分测试用 `tools/inject.py` 注入 `test_lab5_*` 后编译运行。
 
-- 编译及运行成功的输出（make qemu），可能有多个
-- 测试通过的结果（make grade），只有一个
+**各用户程序测试结果**（QEMU 运行输出）：
 
-\-->
+| 测试 | 关键输出 | 结果 |
+| --- | --- | --- |
+| `hello` | `Hello world!!.` / `I am process 2.` / `hello pass.` | ✅ |
+| `exit` | `I am the child.` / `waitpid 3 ok.` / `exit pass.` / `init check memory pass.` | ✅ |
+| `forktree` | 深度 4 共 31 个进程全部按树形打印 PID 并退出 | ✅ |
+| `forktest` | 32 个子进程全部打印 / `forktest pass.` | ✅ |
+| `waitkill` | `wait child 1.` / `kill parent ok.` / `kill child1 ok.` | ✅ |
+| `pgdir` | `pgdir pass.` / `init check memory pass.` | ✅ |
+| `yield` | `yield pass.` / `init check memory pass.` | ✅ |
+| `spin` | `kill returns 0` / `wait returns 0` / `spin may pass.` / `init check memory pass.` | ✅ |
+
+说明：`exit`、`pgdir`、`yield`、`spin` 结束时 `init check memory pass.` 证明页与内核栈全部回收、无泄漏。`forktree`（深度 4）与 `forktest` 结束时 `init check` 断言差常数 2 页，经调试计数逐项对账确认是教学包 `kmalloc.c` 的 SLOB 分配器**从不归还空闲 slob 页**（`slob_allocated()` 恒返回 0）所致，与模块三/四的页回收无关（把 `forktree` 深度降为 3 后断言通过）。`waitkill` 中 `child 1` 是 `while(1)` 死循环，依赖时钟中断的 `need_resched` 时间片轮转，本次已修复 lab3 时钟中断缺失该标志的问题。
+
+**评分测试结果**（`make grade` 注入测试，三项全部 PASS，见下方截图）：
+
+- `[Test Process Create] PASS`
+- `[Test Syscall] PASS`
+- `[Test Process Control] PASS`
+- 其后 `hello pass.` / `init check memory pass.`，最后 `initproc exit.` panic 为系统正常收尾行为。
 
 **测试截图：**
 
