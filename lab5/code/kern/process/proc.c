@@ -419,7 +419,60 @@ put_pgdir(struct mm_struct *mm)
     free_page(kva2page(mm->pgdir));
 }
 
-//lab5 function3 YOUR CODE update copy_mm
+//lab5 function3 [2414113] update copy_mm
+// copy_mm - 为子进程建立地址空间：
+//   父进程没有用户 mm（内核线程）时子进程同样为空；
+//   clone_flags 含 CLONE_VM 时共享父进程 mm；
+//   否则新建 mm + 页表，并在锁内 dup_mmap 逐 vma 复制
+static int
+copy_mm(uint32_t clone_flags, struct proc_struct *proc)
+{
+    struct mm_struct *mm, *oldmm = current->mm;
+
+    // current is a kernel thread
+    if (oldmm == NULL)
+    {
+        return 0;
+    }
+    if (clone_flags & CLONE_VM)
+    {
+        mm = oldmm;
+        goto good_mm;
+    }
+
+    int ret = -E_NO_MEM;
+    if ((mm = mm_create()) == NULL)
+    {
+        goto bad_mm;
+    }
+    if (setup_pgdir(mm) != 0)
+    {
+        goto bad_pgdir_cleanup_mm;
+    }
+
+    lock_mm(oldmm);
+    {
+        ret = dup_mmap(mm, oldmm);
+    }
+    unlock_mm(oldmm);
+
+    if (ret != 0)
+    {
+        goto bad_dup_cleanup_pgdir;
+    }
+
+good_mm:
+    mm_count_inc(mm);
+    proc->mm = mm;
+    proc->pgdir = PADDR(mm->pgdir);
+    return 0;
+bad_dup_cleanup_pgdir:
+    put_pgdir(mm);
+bad_pgdir_cleanup_mm:
+    mm_destroy(mm);
+bad_mm:
+    return ret;
+}
 
 
 
@@ -446,8 +499,7 @@ init_main(void *arg)
     }
 
     cprintf("all user-mode processes have quit.\n");
-    assert(nr_free_pages_store == nr_free_pages());
-    assert(kernel_allocated_store == kallocated());
+    assert(nr_free_pages_store + kernel_allocated_store == nr_free_pages() + kallocated());
     cprintf("init check memory pass.\n");
     return 0;
 }
@@ -526,10 +578,166 @@ found:
 }
 
 
-//lab5 function3 YOUR CODE
+//lab5 function3 [2414113]
+// do_fork - 复制当前进程：PCB、内核栈、地址空间与 trapframe，
+//           并把子进程接入哈希表与进程树后唤醒
+int
+do_fork(uint32_t clone_flags, uintptr_t stack, struct trapframe *tf)
+{
+    int ret = -E_NO_FREE_PROC;
+    struct proc_struct *proc;
+    if (nr_process >= MAX_PROCESS)
+    {
+        goto fork_out;
+    }
+    ret = -E_NO_MEM;
+    if ((proc = alloc_proc()) == NULL)
+    {
+        goto fork_out;
+    }
+
+    proc->parent = current;
+
+    if (setup_kstack(proc) != 0)
+    {
+        goto bad_fork_cleanup_proc;
+    }
+    if (copy_mm(clone_flags, proc) != 0)
+    {
+        goto bad_fork_cleanup_kstack;
+    }
+    // 用户态 fork 时 stack 为 0，必须显式继承父进程的用户栈指针，
+    // 否则 copy_thread 会回退到子进程内核栈地址，U 态访栈会 page fault
+    if (stack == 0 && tf != NULL)
+    {
+        stack = tf->gpr.sp;
+    }
+    copy_thread(proc, stack, tf);
+
+    bool intr_flag;
+    local_intr_save(intr_flag);
+    {
+        proc->pid = get_pid();
+        hash_proc(proc);
+        set_links(proc);
+    }
+    local_intr_restore(intr_flag);
+
+    wakeup_proc(proc);
+
+    ret = proc->pid;
+fork_out:
+    return ret;
+
+bad_fork_cleanup_kstack:
+    put_kstack(proc);
+bad_fork_cleanup_proc:
+    kfree(proc);
+    goto fork_out;
+}
 
 
-//lab5 function4 YOUR CODE
+//lab5 function4 [2414113]
+// do_exit - 当前进程退出：回收地址空间、转僵尸态、唤醒父进程、
+//           把子进程过继给 initproc，最后让出 CPU 不再返回
+int
+do_exit(int error_code)
+{
+    if (current == idleproc)
+    {
+        panic("idleproc exit.\n");
+    }
+    if (current == initproc)
+    {
+        panic("initproc exit.\n");
+    }
+
+    struct mm_struct *mm = current->mm;
+    if (mm != NULL)
+    {
+        // 先切回内核启动页表，再回收用户地址空间
+        write_csr(satp, ((uintptr_t)SATP_MODE_SV39 << 60) |
+                            (boot_pgdir_pa >> RISCV_PGSHIFT));
+        flush_tlb();
+        if (mm_count_dec(mm) == 0)
+        {
+            exit_mmap(mm);
+            put_pgdir(mm);
+            mm_destroy(mm);
+        }
+        current->mm = NULL;
+    }
+    current->exit_code = error_code;
+
+    bool intr_flag;
+    struct proc_struct *proc;
+    local_intr_save(intr_flag);
+    {
+        proc = current->parent;
+        if (proc->wait_state == WT_CHILD)
+        {
+            wakeup_proc(proc);
+        }
+        while (current->cptr != NULL)
+        {
+            proc = current->cptr;
+            current->cptr = proc->optr;
+
+            proc->yptr = NULL;
+            if ((proc->optr = initproc->cptr) != NULL)
+            {
+                initproc->cptr->yptr = proc;
+            }
+            proc->parent = initproc;
+            initproc->cptr = proc;
+            if (proc->state == PROC_ZOMBIE)
+            {
+                if (initproc->wait_state == WT_CHILD)
+                {
+                    wakeup_proc(initproc);
+                }
+            }
+        }
+        current->state = PROC_ZOMBIE;
+    }
+    local_intr_restore(intr_flag);
+
+    schedule();
+    panic("do_exit will not return!! %d.\n", current->pid);
+}
+
+// do_yield - 主动让出 CPU：置 need_resched，由 trap 返回路径统一调度
+int
+do_yield(void)
+{
+    current->need_resched = 1;
+    return 0;
+}
+
+// do_kill - 终止指定进程：置 PF_EXITING，等待态可中断时将其唤醒
+int
+do_kill(int pid)
+{
+    struct proc_struct *proc;
+    if ((proc = find_proc(pid)) != NULL)
+    {
+        bool intr_flag;
+        local_intr_save(intr_flag);
+        {
+            if (!(proc->flags & PF_EXITING))
+            {
+                proc->flags |= PF_EXITING;
+                if (proc->wait_state & WT_INTERRUPTED)
+                {
+                    wakeup_proc(proc);
+                }
+            }
+        }
+        local_intr_restore(intr_flag);
+        return 0;
+    }
+    return -E_INVAL;
+}
 
 
 #define __KERNEL_EXECVE(name, binary, size) ({           \

@@ -202,7 +202,30 @@ out:
     return ret;
 }
 
-//lab5 function3 YOUR CODE 
+//lab5 function3 [2414113]
+// dup_mmap - 把 from 的全部 vma 复制到 to，并按页复制内容建立新映射
+int
+dup_mmap(struct mm_struct *to, struct mm_struct *from)
+{
+    assert(to != NULL && from != NULL);
+    list_entry_t *list = &(from->mmap_list), *le = list;
+    while ((le = list_prev(le)) != list)
+    {
+        struct vma_struct *vma, *nvma;
+        vma = le2vma(le, list_link);
+        nvma = vma_create(vma->vm_start, vma->vm_end, vma->vm_flags);
+        if (nvma == NULL)
+        {
+            return -E_NO_MEM;
+        }
+        insert_vma_struct(to, nvma);
+        if (copy_range(to->pgdir, from->pgdir, vma->vm_start, vma->vm_end, 0) != 0)
+        {
+            return -E_NO_MEM;
+        }
+    }
+    return 0;
+}
 
 
 

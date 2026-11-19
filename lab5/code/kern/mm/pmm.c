@@ -375,9 +375,10 @@ void exit_range(pde_t *pgdir, uintptr_t start, uintptr_t end)
                         free_page(pde2page(pde0));
                         pd0[PDX0(d0start)] = 0;
                     }
+                    else
+                        free_pd0 = 0;
                 }
-                else
-                    free_pd0 = 0;
+                
                 d0start += PTSIZE;
             } while (d0start != 0 && d0start < d1start + PDSIZE && d0start < end);
             // free level 0 page directory only when all pde0s in it are already invalid
@@ -393,7 +394,55 @@ void exit_range(pde_t *pgdir, uintptr_t start, uintptr_t end)
 }
 
 
-//lab5 function3 YOUR CODE 
+//lab5 function3 [2414113]
+// copy_range - 把 from 页表 [start, end) 区间内的页面内容复制到 to 页表，
+//              share 为 0 时逐页分配新页并拷贝内容；非 0 时共享同一物理页
+int
+copy_range(pde_t *to, pde_t *from, uintptr_t start, uintptr_t end, bool share)
+{
+    assert(start % PGSIZE == 0 && end % PGSIZE == 0);
+    assert(USER_ACCESS(start, end));
+    do
+    {
+        pte_t *ptep = get_pte(from, start, 0), *nptep;
+        if (ptep == NULL)
+        {
+            // 该大区间没有页表，直接跳到下一个 PTSIZE 边界
+            start = ROUNDDOWN(start + PTSIZE, PTSIZE);
+            continue;
+        }
+        if (*ptep & PTE_V)
+        {
+            if ((nptep = get_pte(to, start, 1)) == NULL)
+            {
+                return -E_NO_MEM;
+            }
+            uint32_t perm = (*ptep & PTE_USER);
+            struct Page *page = pte2page(*ptep);
+            if (share)
+            {
+                page_insert(to, page, start, perm);
+                page_ref_inc(page);
+            }
+            else
+            {
+                struct Page *npage = alloc_page();
+                if (npage == NULL)
+                {
+                    return -E_NO_MEM;
+                }
+                memcpy(page2kva(npage), page2kva(page), PGSIZE);
+                if (page_insert(to, npage, start, perm) != 0)
+                {
+                    free_page(npage);
+                    return -E_NO_MEM;
+                }
+            }
+        }
+        start += PGSIZE;
+    } while (start != 0 && start < end);
+    return 0;
+}
 
 
 //lab4 请补充你在lab4中的代码
