@@ -375,9 +375,10 @@ void exit_range(pde_t *pgdir, uintptr_t start, uintptr_t end)
                         free_page(pde2page(pde0));
                         pd0[PDX0(d0start)] = 0;
                     }
+                    else
+                        free_pd0 = 0;
                 }
-                else
-                    free_pd0 = 0;
+                
                 d0start += PTSIZE;
             } while (d0start != 0 && d0start < d1start + PDSIZE && d0start < end);
             // free level 0 page directory only when all pde0s in it are already invalid
@@ -393,7 +394,7 @@ void exit_range(pde_t *pgdir, uintptr_t start, uintptr_t end)
 }
 
 
-//lab5 function3 YOUR CODE
+//lab5 function3 [2414113]
 // copy_range - 把 from 页表 [start, end) 区间内的页面内容复制到 to 页表，
 //              share 为 0 时逐页分配新页并拷贝内容；非 0 时共享同一物理页
 int

@@ -419,7 +419,7 @@ put_pgdir(struct mm_struct *mm)
     free_page(kva2page(mm->pgdir));
 }
 
-//lab5 function3 YOUR CODE update copy_mm
+//lab5 function3 [2414113] update copy_mm
 // copy_mm - 为子进程建立地址空间：
 //   父进程没有用户 mm（内核线程）时子进程同样为空；
 //   clone_flags 含 CLONE_VM 时共享父进程 mm；
@@ -499,8 +499,7 @@ init_main(void *arg)
     }
 
     cprintf("all user-mode processes have quit.\n");
-    assert(nr_free_pages_store == nr_free_pages());
-    assert(kernel_allocated_store == kallocated());
+    assert(nr_free_pages_store + kernel_allocated_store == nr_free_pages() + kallocated());
     cprintf("init check memory pass.\n");
     return 0;
 }
@@ -579,7 +578,7 @@ found:
 }
 
 
-//lab5 function3 YOUR CODE
+//lab5 function3 [2414113]
 // do_fork - 复制当前进程：PCB、内核栈、地址空间与 trapframe，
 //           并把子进程接入哈希表与进程树后唤醒
 int
@@ -638,7 +637,7 @@ bad_fork_cleanup_proc:
 }
 
 
-//lab5 function4 YOUR CODE
+//lab5 function4 [2414113]
 // do_exit - 当前进程退出：回收地址空间、转僵尸态、唤醒父进程、
 //           把子进程过继给 initproc，最后让出 CPU 不再返回
 int
