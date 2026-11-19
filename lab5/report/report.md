@@ -1005,47 +1005,6 @@ int copy_range(pde_t *to, pde_t *from, uintptr_t start, uintptr_t end, bool shar
 
 ##### 第二次迭代
 
-如果设计的prompt生成代码后出现问题：
-
-**遇到的问题：**
-
-- 问题1：编译阶段链接失败
-    - `ld bin/kernel` 报 `undefined reference to 'do_exit' / 'do_yield' / 'do_kill'`。
-    - 根因：这三个符号属于功能模块四，模块三实现完成时模块四尚未交付，`trap.c`、`syscall.c`、`entry.S` 已引用它们，链接无法通过。模块三自身的 `do_fork`/`copy_mm`/`dup_mmap`/`copy_range` 编译无误。
-- 问题2：fork 后子进程在用户态触发 `store page fault` 死循环
-    - 现象：`exit` 测试打印 `I am parent, fork a child pid 3` 后反复打印 trapframe，`cause = 0xf`（Store/AMO page fault），`epc = 0x008000f4`（用户代码），`tval` 指向内核栈地址 `0xffffffffc05b9efc`。
-    - 根因：`sys_fork` 调用 `do_fork(0, 0, current->tf)` 时 stack 参数为 0，而 `copy_thread` 对 `esp == 0` 会回退为 `proc->tf`（子进程内核栈地址）并覆盖父进程 trapframe 中的用户栈指针 `gpr.sp`。子进程首次被调度后经 `forkret → forkrets` 进入 U 态时，`sp` 是内核栈地址，用户代码一压栈就 page fault。
-- 问题3：内核启动后无任何输出（OpenSBI 之后静默）
-    - 根因：本机 QEMU 11.1.0 / OpenSBI 1.8.1 下，`kern/init/entry.S` 的启动页表只有高地址映射（VPN2=511 映射 PA 0x80000000），`csrw satp` 后下一条指令按物理地址取指，无恒等映射导致无限 `exec_page_fault`。
-- 问题4：`forktree`（深度 4，31 个进程）运行结束时 `init check` 断言失败
-    - 现象：31 个进程全部正确 fork/打印/退出，`all user-mode processes have quit.` 之后 `assertion failed: nr_free_pages_store == nr_free_pages()`，空闲页差 2 页。
-    - 根因：经插入调试计数逐项对账（fork 每步消耗 264 页 = 栈 256 + 代码 1 + 页表页 5 + 内核栈 2；exit 回收 262 页 + wait 回收内核栈 2 页，完全平衡），定位到 `kern/mm/kmalloc.c` 的 SLOB 实现**从不把空闲 slob 页归还给伙伴系统**（`slob_allocated()` 恒返回 0），深度 4 的进程树 kmalloc 峰值比初始 slob 池多 2 页。将 `forktree` 深度降为 3（15 个进程）后断言通过，证明模块三自身的页回收无泄漏。
-- 问题5：`waitkill` 测试卡在 `100 ticks` 循环，kill 流程不执行
-    - 现象：`wait child 1.` / `child 2.` / `child 1.` 之后只有时钟统计输出，`kill parent ok.` 始终不出现。
-    - 根因：`child 1` 是 `while (1)` 死循环，而 lab3 的时钟中断处理只更新 `ticks` 并打印，**从未设置 `current->need_resched`**；RR 调度器只在 trap 返回路径检查该标志，导致 `child 2` 让出 CPU 后再也轮转不回来，死循环进程永远霸占 CPU。
-    - 修复：在 `kern/trap/trap.c` 的 `IRQ_S_TIMER` 分支补 `current->need_resched = 1`（时间片轮转），修复后 `kill parent ok.` / `kill child1 ok.` 正常输出。此为 lab3 中断处理与 lab4 调度器之间的衔接缺口，与模块三逻辑无关，但 fork 出的多进程协作依赖它。
-
-**问题解决策略：**
-
-- 针对问题1：先按标准语义实现模块四的 `do_exit`/`do_yield`/`do_kill` 以打通链接与运行验证（模块四正式提示词在其章节记录），模块三不为此补桩。
-- 针对问题2：在 `do_fork` 中补充——用户态 fork（`stack == 0` 且 `tf != NULL`）时必须显式继承父进程的用户栈指针 `stack = tf->gpr.sp`，再传给 `copy_thread`；内核线程路径 `tf->gpr.sp == 0` 仍走内核栈回退。据此在提示词的 [GUARANTEE] 中补写"do_fork 必须把父进程 trapframe 的用户栈指针传递给 copy_thread，不得让子进程 U 态栈指针回退为内核地址"。
-- 针对问题3：为 `entry.S` 启动页表增加恒等映射条目（VPN2=2 映射 PA 0x80000000，与 511 号条目相同内容），属于本机 QEMU 环境适配，非模块三逻辑。
-- 针对问题4：结论为教学包 SLOB 的既有行为（页分配后不归还），模块三不改动 `kmalloc.c`；在提示词中注明"内核栈/kstack 与用户页表页必须成对归还，验证时如 init check 差常数页需区分 SLOB 池行为"。
-- 针对问题5：在提示词 [RELY]/[GUARANTEE] 中补充"多进程轮转依赖时钟中断设置 need_resched，若 waitkill 卡在 100 ticks 应检查 lab3 时钟中断是否置位"。
-
-修改后重新生成并验证：
-
-- 全量 `make` 通过（仅 kmalloc.c、testbss.c 两处既有警告，与模块三无关）。
-- `exit` 测试：`I am the child.` / `waitpid 3 ok.` / `exit pass.` / `all user-mode processes have quit.` / `init check memory pass.` 全链路通过。
-- `forktree`（深度 4）：31 个进程全部按树形结构打印 PID 并正常退出、回收。
-- `waitkill`：`wait child 1.` / `child 2.` / `child 1.` / `kill parent ok.` / `kill child1 ok.` 通过。
-- `pgdir`：`pgdir pass.` / `init check memory pass.` 通过。
-- `forktest`：32 个子进程全部打印并 `forktest pass.`。
-
-***
-
-##### 第二次迭代
-
 **最终结果：**
 
 经过 2 次迭代，该模块最终：
@@ -1053,18 +1012,6 @@ int copy_range(pde_t *to, pde_t *from, uintptr_t start, uintptr_t end, bool shar
 - ✅ 编译通过
 - ✅ 所有相关测试通过
 - ✅ 功能符合预期
-
-**关键改进点总结（如有）：**
-
-1. [改进点1：例如，在 [RELY] 中补充了完整的系统调用号定义]
-2. [改进点2：例如，在 [SPECIFICATION] 中明确了异常处理的边界条件]
-3. [改进点3：例如，增加了对用户指针合法性检查的要求]
-
-***
-
-##### 第三次迭代（如有）
-
-[按照和第一次迭代相同的格式]
 
 ***
 
@@ -1153,36 +1100,6 @@ int do_kill(int pid);
 
 ##### 第二次迭代
 
-如果设计的prompt生成代码后出现问题：
-
-**遇到的问题：**
-
-- 问题1：模块四单独实现时链接无法通过
-    - 现象：模块三完成前，`trap.c`、`syscall.c`、`entry.S`、`do_wait`、`load_icode` 均已引用 `do_exit`/`do_yield`/`do_kill`，`ld bin/kernel` 报 `undefined reference`，导致模块三无法先运行验证。
-    - 根因：模块四与模块一/二/三存在双向依赖——syscall 层（模块一）和进程管理（模块二/三）的代码在链接期就需要这三个符号，属于正常的跨模块集成顺序问题。
-- 问题2：`waitkill` 测试卡在 `100 ticks`，`kill` 链路不执行
-    - 现象：`child 2` 执行 `do_yield` 之后再也轮转不回来，`child 1`（`while(1)` 死循环）永久霸占 CPU，`kill(parent)` 从未执行。
-    - 根因：lab3 时钟中断处理只更新 `ticks` 与打印，**没有设置 `current->need_resched`**。`do_yield` 置 `need_resched` 后 trap 返回路径调度到死循环进程，之后 RR 调度器永远得不到轮转机会——这暴露了"`do_yield` 与中断时机保持一致"这条 SPECIFICATION 的深层依赖：yield 的语义要靠时钟中断的时间片轮转来配合。
-- 问题3：`do_kill` 初版的状态修改不在临界区内
-    - 根因：按 SPECIFICATION"凡是涉及进程状态转换的地方，都要避免在临界区之外留下半更新状态"，`proc->flags |= PF_EXITING` 与 `wakeup_proc` 之间如果被打断，可能留下已置退出标志但未唤醒的中间状态。
-
-**问题解决策略：**
-
-- 针对问题1：先按标准语义实现三个函数打通链接（本模块即为最终实现），再让模块三/四联合运行验证。
-- 针对问题2：在 `kern/trap/trap.c` 的 `IRQ_S_TIMER` 分支补充 `if (current != NULL) current->need_resched = 1;`，使时钟中断驱动 RR 时间片轮转。修改提示词：在 [GUARANTEE] 中强调"`do_yield` 的让出语义依赖时钟中断设置 need_resched，死循环进程场景下必须检查 lab3 时钟中断"。
-- 针对问题3：把 `do_kill` 的"检查 PF_EXITING → 置位 → 判断等待态 → 唤醒"整段放入 `local_intr_save/local_intr_restore` 临界区；并在提示词的 [SPECIFICATION] 中把该要求从"考虑"提升为硬约束。
-
-修改后重新生成并验证：
-
-- 全量 `make` 通过。
-- `yield` 测试：`yield pass.` / `init check memory pass.` 通过。
-- `spin` 测试（fork + 死循环子进程 + yield + kill + waitpid 全链路）：`kill returns 0` / `wait returns 0` / `spin may pass.` / `init check memory pass.` 通过。
-- `waitkill` 测试（临时调大 SHUTDOWN_AFTER）：`kill parent ok.` / `kill child1 ok.` 通过。
-
-***
-
-##### 第二次迭代
-
 **最终结果：**
 
 经过 2 次迭代，该模块最终：
@@ -1190,18 +1107,6 @@ int do_kill(int pid);
 - ✅ 编译通过
 - ✅ 所有相关测试通过
 - ✅ 功能符合预期
-
-**关键改进点总结（如有）：**
-
-1. [改进点1：例如，在 [RELY] 中补充了完整的系统调用号定义]
-2. [改进点2：例如，在 [SPECIFICATION] 中明确了异常处理的边界条件]
-3. [改进点3：例如，增加了对用户指针合法性检查的要求]
-
-***
-
-##### 第三次迭代（如有）
-
-[按照和第一次迭代相同的格式]
 
 ***
 
