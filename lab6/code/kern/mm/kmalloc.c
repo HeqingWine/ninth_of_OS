@@ -76,12 +76,14 @@ typedef struct bigblock bigblock_t;
 static slob_t arena = {.next = &arena, .units = 1};
 static slob_t *slobfree = &arena;
 static bigblock_t *bigblocks;
+static size_t slob_allocated_pages = 0;
 
 static void *__slob_get_free_pages(gfp_t gfp, int order)
 {
 	struct Page *page = alloc_pages(1 << order);
 	if (!page)
 		return NULL;
+	slob_allocated_pages += (1 << order);
 	return page2kva(page);
 }
 
@@ -90,6 +92,7 @@ static void *__slob_get_free_pages(gfp_t gfp, int order)
 static inline void __slob_free_pages(unsigned long kva, int order)
 {
 	free_pages(kva2page(kva), 1 << order);
+	slob_allocated_pages -= (1 << order);
 }
 
 static void slob_free(void *b, int size);
@@ -208,7 +211,7 @@ kmalloc_init(void)
 size_t
 slob_allocated(void)
 {
-	return 0;
+	return slob_allocated_pages;
 }
 
 size_t
