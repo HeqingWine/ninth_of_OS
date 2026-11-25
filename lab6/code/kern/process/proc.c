@@ -87,9 +87,39 @@ static struct proc_struct *alloc_proc(void);
 static void forkret(void);
 static int init_main(void *arg);
 
-//lab6 function1-1 YOUR CODE update alloc_proc 
-
-
+//lab6 function1-1 [2413094] update alloc_proc 
+static struct proc_struct *
+alloc_proc(void)
+{
+    struct proc_struct *proc = kmalloc(sizeof(struct proc_struct));
+    if (proc != NULL)
+    {
+        memset(proc, 0, sizeof(struct proc_struct));
+        proc->state = PROC_UNINIT;
+        proc->pid = -1;
+        proc->runs = 0;
+        proc->kstack = 0;
+        proc->need_resched = 0;
+        proc->parent = NULL;
+        proc->mm = NULL;
+        proc->tf = NULL;
+        proc->pgdir = 0;
+        proc->flags = 0;
+        memset(proc->name, 0, sizeof(proc->name));
+        proc->exit_code = 0;
+        proc->wait_state = 0;
+        proc->cptr = proc->yptr = proc->optr = NULL;
+        proc->rq = NULL;
+        list_init(&(proc->run_link));
+        proc->time_slice = 0;
+        proc->lab6_run_pool.parent = NULL;
+        proc->lab6_run_pool.left = NULL;
+        proc->lab6_run_pool.right = NULL;
+        proc->lab6_stride = 0;
+        proc->lab6_priority = 0;
+    }
+    return proc;
+}
 
 // copy_thread - 在新进程的内核栈上建立 trapframe 与 context，
 //               使其首次被调度时能够运行 trapframe 中指定的函数
@@ -189,34 +219,6 @@ proc_run(struct proc_struct *proc)
         }
         local_intr_restore(intr_flag);
     }
-}
-
-//lab5 function2 [2411617]
-// update alloc_proc
-// alloc_proc - alloc a proc_struct and init all fields of proc_struct
-static struct proc_struct *
-alloc_proc(void)
-{
-    struct proc_struct *proc = kmalloc(sizeof(struct proc_struct));
-    if (proc != NULL)
-    {
-        memset(proc, 0, sizeof(struct proc_struct));
-        proc->state = PROC_UNINIT;
-        proc->pid = -1;
-        proc->runs = 0;
-        proc->kstack = 0;
-        proc->need_resched = 0;
-        proc->parent = NULL;
-        proc->mm = NULL;
-        proc->tf = NULL;
-        proc->pgdir = 0;
-        proc->flags = 0;
-        memset(proc->name, 0, sizeof(proc->name));
-        proc->exit_code = 0;
-        proc->wait_state = 0;
-        proc->cptr = proc->yptr = proc->optr = NULL;
-    }
-    return proc;
 }
 
 // set_proc_name - set the name of proc
