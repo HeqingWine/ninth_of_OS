@@ -95,14 +95,9 @@ void print_regs(struct pushregs *gpr)
 
 extern struct mm_struct *check_mm_struct;
 
-//lab6 function1-2 YOUR CODE update interrupt_handler
+#define SHUTDOWN_AFTER 3
 
 void kernel_execve_ret(struct trapframe *tf, uintptr_t kstacktop);
-
-
-//lab5 请补充你在lab5中的代码
-//lab3 function2 [2414113]
-#define SHUTDOWN_AFTER 3
 
 /* instr_length - 根据 RISC-V 指令低 2 位判断当前指令长度：
  * bits[1:0] == 3 表示 32 位指令（4 字节），否则为 16 位压缩指令（2 字节） */
@@ -110,7 +105,7 @@ static inline int instr_length(uintptr_t epc) {
     return ((*(uint16_t *)epc) & 0x3) == 0x3 ? 4 : 2;
 }
 
-/* interrupt_handler - 根据 Trap 原因分类处理中断 */
+//lab6 function1-2 [2413094] update interrupt_handler
 void interrupt_handler(struct trapframe *tf) {
     intptr_t cause = ((intptr_t)tf->cause << 1) >> 1;
     switch (cause) {
@@ -126,6 +121,9 @@ void interrupt_handler(struct trapframe *tf) {
                     sbi_shutdown();
                 }
             }
+            if (current != NULL) {
+                sched_class_proc_tick(current);
+            }
             break;
         case IRQ_S_SOFT:
             cprintf("Supervisor software interrupt\n");
@@ -138,6 +136,7 @@ void interrupt_handler(struct trapframe *tf) {
     }
 }
 
+//lab5 请补充你在lab5中的代码
 /* exception_handler - 根据 Trap 原因分类处理异常 */
 void exception_handler(struct trapframe *tf) {
     switch (tf->cause) {
