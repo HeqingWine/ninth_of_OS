@@ -23,8 +23,11 @@ static void print_ticks()
 {
     cprintf("%d ticks\n", TICK_NUM);
 #ifdef DEBUG_GRADE
-    cprintf("End of Test.\n");
-    panic("EOT: kernel seems ok.");
+    // 与 SHUTDOWN_AFTER 对齐：等 priority 之类的长测试跑完再 EOT
+    if (ticks >= TICK_NUM * 3) {
+        cprintf("End of Test.\n");
+        panic("EOT: kernel seems ok.");
+    }
 #endif
 }
 
