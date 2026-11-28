@@ -85,36 +85,29 @@ void wakeup_proc(struct proc_struct *proc)
 }
 
 //lab4 请补充你在lab4中的代码
-// schedule - 轮转调度器：
+// [Lab6 已改动] 本函数已由 lab4 的 proc_list 轮转改为通过调度类接口选择进程。
+// schedule - 调度框架入口：
 //   1) 清除 current->need_resched；
-//   2) 从 proc_list 中查找下一个 PROC_RUNNABLE 线程（跳过 idleproc）；
-//   3) 找不到其他就绪线程时退回 idleproc 保底；
-//   4) next != current 时调用 proc_run 完成切换。
+//   2) current 仍为 PROC_RUNNABLE 时通过 sched_class_enqueue() 重新入队；
+//   3) 通过 sched_class_pick_next() 选择下一个进程，非空则 sched_class_dequeue()；
+//   4) 空队列时退回 idleproc，next != current 时调用 proc_run 完成切换。
 void
 schedule(void)
 {
     bool intr_flag;
-    list_entry_t *le, *last;
     struct proc_struct *next = NULL;
-
     local_intr_save(intr_flag);
     {
         current->need_resched = 0;
-        last = (current == idleproc) ? &proc_list : &(current->list_link);
-        le = last;
-        do
+        if (current->state == PROC_RUNNABLE)
         {
-            if ((le = list_next(le)) != &proc_list)
-            {
-                next = le2proc(le, list_link);
-                if (next->state == PROC_RUNNABLE && next != idleproc)
-                {
-                    break;
-                }
-            }
-        } while (le != last);
-
-        if (next == NULL || next->state != PROC_RUNNABLE || next == idleproc)
+            sched_class_enqueue(current);
+        }
+        if ((next = sched_class_pick_next()) != NULL)
+        {
+            sched_class_dequeue(next);
+        }
+        if (next == NULL)
         {
             next = idleproc;
         }
@@ -126,4 +119,3 @@ schedule(void)
     }
     local_intr_restore(intr_flag);
 }
-
